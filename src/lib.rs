@@ -1,54 +1,51 @@
-use tracing_subscriber::{fmt, EnvFilter};
+//! Vector Store - A high-performance vector storage implementation
+//! 
+//! This crate provides a sophisticated vector storage system with temporal memory management,
+//! designed for AI applications. It features memory consolidation, decay simulation, and
+//! relationship tracking.
 
-pub mod error;
+// Core modules
+pub mod core;
+pub mod memory;
 pub mod storage;
-pub mod logging;
 pub mod utils;
 
-pub use error::{Result, VectorStoreError};
-pub use storage::{HnswConfig, HnswIndex, Vector, VectorStorage};
+// Re-exports of commonly used types
+pub use core::config::MemoryConfig;
+pub use core::error::{MemoryError, Result};
+pub use memory::types::{MemoryAttributes, TemporalVector, Vector};
+pub use storage::{
+    metrics::{CosineDistance, DistanceMetric},
+    hnsw::{HNSWConfig, TemporalHNSW},
+};
 
-/// Initialize the vector store with logging
+/// Initialize the vector store with default configuration
 pub fn init() -> Result<()> {
-    let log_dir = std::env::temp_dir().join("vector-store-logs");
-    std::fs::create_dir_all(&log_dir)?;
-    logging::init_logging(log_dir)?;
-    Ok(())
+    init_with_config(MemoryConfig::default())
 }
 
-/// Initialize the logging system with the specified log level
-pub fn init_logging() {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-
-    fmt()
-        .with_env_filter(env_filter)
-        .with_file(true)
-        .with_line_number(true)
-        .with_thread_ids(true)
-        .with_target(false)
-        .init();
+/// Initialize the vector store with custom configuration
+pub fn init_with_config(config: MemoryConfig) -> Result<()> {
+    config.validate().map_err(MemoryError::ConfigError)?;
     
-    tracing::info!("Vector Store logging initialized");
+    // Initialize logging
+    core::logging::init_logging();
+    
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracing::info;
 
     #[test]
-    fn test_init() {
-        init().unwrap();
-        info!("Vector store initialized successfully");
+    fn test_initialization() {
+        assert!(init().is_ok());
     }
 
-    use tracing_subscriber::{fmt, EnvFilter};
-
-    pub fn init_logging() {
-        let _ = fmt()
-            .with_env_filter(EnvFilter::from_default_env())
-            .with_test_writer()
-            .try_init();
+    #[test]
+    fn test_custom_config() {
+        let config = MemoryConfig::default();
+        assert!(init_with_config(config).is_ok());
     }
 }
