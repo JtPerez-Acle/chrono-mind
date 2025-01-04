@@ -1,18 +1,18 @@
 use std::sync::Arc;
-
 use vector_store::{
-    core::{
-        config::MemoryConfig,
-        error::Result,
-    },
     storage::metrics::CosineDistance,
+    memory::temporal::MemoryStorage,
+    core::config::MemoryConfig,
 };
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    println!("Vector Store - A fast and efficient vector storage solution");
+    
+    // Example initialization
     let config = MemoryConfig::default();
     let metric = Arc::new(CosineDistance::new());
+    let _storage = MemoryStorage::new(config, metric);
     
-    let _storage = vector_store::init_with_config(config)?;
-    Ok(())
+    // Add your code here
 }

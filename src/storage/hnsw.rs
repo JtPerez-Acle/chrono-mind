@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, BinaryHeap},
+    collections::HashMap,
     sync::Arc,
     time::{SystemTime, Duration},
 };
@@ -35,11 +35,15 @@ impl Default for HNSWConfig {
 
 #[derive(Debug)]
 struct Node {
+    #[allow(dead_code)]
     id: String,
-    vector: Vec<f32>,
+    #[allow(dead_code)]
     layer: usize,
     connections: Vec<Vec<String>>,
+    vector: Vec<f32>,
+    #[allow(dead_code)]
     temporal_score: f32,
+    #[allow(dead_code)]
     timestamp: SystemTime,
 }
 
@@ -47,9 +51,9 @@ impl Node {
     fn new(id: String, vector: Vec<f32>, layer: usize, temporal_score: f32) -> Self {
         Self {
             id,
-            vector,
             layer,
             connections: vec![Vec::new(); layer + 1],
+            vector,
             temporal_score,
             timestamp: SystemTime::now(),
         }
@@ -60,6 +64,7 @@ impl Node {
 struct Candidate {
     id: String,
     distance: f32,
+    #[allow(dead_code)]
     temporal_score: f32,
 }
 
@@ -239,6 +244,7 @@ impl TemporalHNSW {
             .collect())
     }
 
+    #[allow(dead_code)]
     fn temporal_score(&self, id: &str, now: SystemTime, nodes: &HashMap<String, Node>) -> f32 {
         if let Some(node) = nodes.get(id) {
             let age = now.duration_since(node.timestamp)

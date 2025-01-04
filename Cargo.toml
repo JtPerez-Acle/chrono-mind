@@ -48,15 +48,22 @@ opentelemetry_sdk = { version = "0.20" }
 opentelemetry-otlp = { version = "0.13" }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+indicatif = "0.17"
+colored = "2.0"
 proptest = "1.4"
 test-log = "0.2"
 tokio-test = "0.4"
-tempfile = "3.8"
+env_logger = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = "0.4"
+plotters = "0.3"
 
 [[bench]]
-name = "vector_ops"
+name = "main"
 harness = false
+path = "benches/main.rs"
 
 [[test]]
 name = "integration"

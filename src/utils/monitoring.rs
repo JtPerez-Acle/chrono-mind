@@ -13,6 +13,7 @@ use tracing::{debug, warn};
 use crate::memory::types::MemoryStats;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct MetricsRegistry {
     meter: Meter,
     operation_duration: Histogram<f64>,

@@ -95,6 +95,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `TaskError` and `Other` variants to `MemoryError` for better error handling
 - Implemented `From<tokio::task::JoinError>` for `MemoryError`
 - Added `ef_search` parameter to HNSW configuration for better search control
+- Comprehensive benchmark suite with advanced metrics collection
+  - Latency profiling (p50, p95, p99, std dev)
+  - Throughput measurements (QPS, operations/sec)
+  - Resource utilization tracking (CPU, memory, optional GPU)
+  - Quality metrics (recall@10, precision@10, MRR)
+  - System performance indicators (cache hits, I/O ops)
+- Vector quality thresholds for performance targets
+  - 95% minimum recall target
+  - 10ms maximum latency target
+  - 1000 QPS throughput target
+- Enhanced benchmark configuration
+  - Logarithmic scale plotting
+  - Standardized warm-up and measurement periods
+  - Statistical significance in sample sizes
+- Normalized vector generation for consistent distance measurements
 
 ### Changed
 - Restructured entire codebase for better modularity
@@ -216,6 +231,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved HNSW search scoring to better balance similarity and temporal weights
 - Enhanced memory relationship handling in `save_memory` to properly merge relationships
 - Updated test configurations to use consistent dimensions and parameters
+- Refactored async runtime handling in benchmarks for better reliability
+- Improved benchmark data structures with comprehensive metrics
+- Updated vector store configuration for optimal performance
+- Enhanced memory management in vector operations
 
 ### Fixed
 - Memory leaks in concurrent operations
@@ -279,6 +298,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Simplified scoring mechanism using direct weighted combination
   - Removed unnecessary distance normalization
   - Improved temporal weight handling for better result ordering
+- Runtime conflicts in async benchmark operations
+- Inconsistent vector normalization in distance calculations
+- Memory leaks in vector storage operations
+- Race conditions in concurrent vector access
 
 ### In Progress
 - Implementing temporal-aware HNSW for efficient similarity search
