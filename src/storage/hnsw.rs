@@ -1,35 +1,83 @@
 use std::{
-    collections::{BinaryHeap, HashMap},
+    collections::{HashMap, BinaryHeap},
     sync::Arc,
+    time::{SystemTime, Duration},
 };
 use tokio::sync::RwLock;
+use rand::random;
 
 use crate::{
     core::error::{MemoryError, Result},
-    memory::types::{TemporalVector, Vector},
+    memory::types::TemporalVector,
     storage::metrics::DistanceMetric,
 };
 
-/// Node in the HNSW graph
-#[derive(Clone, Debug)]
-struct Node {
-    vector: Vector,
-    connections: Vec<Vec<String>>, // Connections at each layer
-    _temporal_score: f32,           // Combined score of importance and recency
+#[derive(Debug, Clone)]
+pub struct HNSWConfig {
+    pub max_dimensions: usize,
+    pub max_connections: usize,
+    pub ef_construction: usize,
+    pub ef_search: usize,
+    pub temporal_weight: f32,
 }
 
-/// Candidate for neighbor search
-#[derive(PartialEq)]
+impl Default for HNSWConfig {
+    fn default() -> Self {
+        Self {
+            max_dimensions: 3,
+            max_connections: 16,
+            ef_construction: 10,
+            ef_search: 10,
+            temporal_weight: 0.1,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Node {
+    id: String,
+    vector: Vec<f32>,
+    layer: usize,
+    connections: Vec<Vec<String>>,
+    temporal_score: f32,
+    timestamp: SystemTime,
+}
+
+impl Node {
+    fn new(id: String, vector: Vec<f32>, layer: usize, temporal_score: f32) -> Self {
+        Self {
+            id,
+            vector,
+            layer,
+            connections: vec![Vec::new(); layer + 1],
+            temporal_score,
+            timestamp: SystemTime::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct Candidate {
     id: String,
     distance: f32,
+    temporal_score: f32,
+}
+
+impl PartialEq for Candidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
 }
 
 impl Eq for Candidate {}
 
 impl PartialOrd for Candidate {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        other.distance.partial_cmp(&self.distance)
+        // Combine distance and temporal_score for comparison
+        // Lower distance and higher temporal_score is better
+        let self_score = self.distance / self.temporal_score;
+        let other_score = other.distance / other.temporal_score;
+        other_score.partial_cmp(&self_score)
     }
 }
 
@@ -39,139 +87,115 @@ impl Ord for Candidate {
     }
 }
 
-/// Configuration for HNSW graph
-#[derive(Clone, Debug)]
-pub struct HNSWConfig {
-    pub max_layers: usize,         // Maximum number of layers
-    pub ef_construction: usize,    // Size of dynamic candidate list for construction
-    pub max_connections: usize,    // Maximum connections per node
-    pub temporal_weight: f32,      // Weight for temporal score (0-1)
-}
-
-impl Default for HNSWConfig {
-    fn default() -> Self {
-        Self {
-            max_layers: 16,
-            ef_construction: 100,
-            max_connections: 32,
-            temporal_weight: 0.3,
-        }
-    }
-}
-
-/// Temporal-aware HNSW implementation
 pub struct TemporalHNSW {
-    nodes: Arc<RwLock<HashMap<String, Node>>>,
-    entry_points: Arc<RwLock<Vec<String>>>,
-    metric: Arc<dyn DistanceMetric>,
     config: HNSWConfig,
+    nodes: RwLock<HashMap<String, Node>>,
+    entry_points: RwLock<Vec<String>>,
+    distance_metric: Arc<dyn DistanceMetric + Send + Sync>,
 }
 
 impl TemporalHNSW {
-    /// Create a new HNSW index
-    pub fn new(metric: impl DistanceMetric + 'static, config: HNSWConfig) -> Self {
+    pub fn new(
+        config: HNSWConfig,
+        distance_metric: Arc<dyn DistanceMetric + Send + Sync>,
+    ) -> Self {
         Self {
-            nodes: Arc::new(RwLock::new(HashMap::new())),
-            entry_points: Arc::new(RwLock::new(Vec::new())),
-            metric: Arc::new(metric),
             config,
+            nodes: RwLock::new(HashMap::new()),
+            entry_points: RwLock::new(Vec::new()),
+            distance_metric,
         }
     }
 
-    /// Insert a temporal vector into the index
     pub async fn insert(&self, temporal: &TemporalVector) -> Result<()> {
+        self.validate_dimensions(&temporal.vector.data)?;
+
         let mut nodes = self.nodes.write().await;
         let mut entry_points = self.entry_points.write().await;
+        let max_layer = self.get_random_layer();
 
-        // Calculate temporal score
-        let temporal_score = self.calculate_temporal_score(temporal);
+        // Calculate temporal score for the new node
+        let now = SystemTime::now();
+        let age = now.duration_since(temporal.attributes.timestamp)
+            .unwrap_or(Duration::from_secs(0))
+            .as_secs_f32();
+        let temporal_score = (-0.1 * age).exp();
 
-        // Create node
-        let node = Node {
-            vector: temporal.vector.clone(),
-            connections: vec![Vec::new(); self.config.max_layers],
-            _temporal_score: temporal_score,
+        let mut new_node = Node::new(
+            temporal.vector.id.clone(),
+            temporal.vector.data.clone(),
+            max_layer,
+            temporal_score,
+        );
+        new_node.timestamp = temporal.attributes.timestamp;
+
+        let mut curr_ep = if let Some(ep) = entry_points.last() {
+            Some(ep.clone())
+        } else {
+            None
         };
 
-        // Insert node
-        if nodes.is_empty() {
-            // First node becomes entry point
-            nodes.insert(temporal.vector.id.clone(), node);
-            entry_points.push(temporal.vector.id.clone());
-            return Ok(());
-        }
+        // Insert edges from max_layer down to 0
+        for layer in (0..=max_layer).rev() {
+            let candidates = if let Some(ref ep) = curr_ep {
+                self.search_layer(
+                    &*nodes,
+                    &temporal.vector.data,
+                    Some(ep),
+                    1,
+                    layer,
+                ).await?
+            } else {
+                Vec::new()
+            };
 
-        // Insert node first
-        nodes.insert(temporal.vector.id.clone(), node);
+            // Update entry point for next layer
+            if !candidates.is_empty() {
+                curr_ep = Some(candidates[0].id.clone());
+            }
 
-        // Find insertion layer
-        let max_layer = self.get_random_layer();
-        let mut current_layer = entry_points.len() - 1;
+            // Select neighbors for the current layer
+            let mut neighbors = Vec::new();
+            for candidate in candidates.iter() {
+                if neighbors.len() >= self.config.max_connections {
+                    break;
+                }
+                neighbors.push(candidate.id.clone());
+            }
 
-        // Start from top layer
-        let mut ep = entry_points[current_layer].clone();
-        let mut ep_dist = self.calculate_distance(&nodes[&ep].vector, &temporal.vector)?;
+            // Add connections
+            while new_node.connections.len() <= layer {
+                new_node.connections.push(Vec::new());
+            }
+            new_node.connections[layer] = neighbors.clone();
 
-        // Search through layers
-        while current_layer > max_layer {
-            let next_ep = self.search_layer(
-                &nodes,
-                &ep,
-                &temporal.vector,
-                1,
-                current_layer,
-            ).await?;
-
-            if let Some((next_id, next_dist)) = next_ep.first().map(|c| (c.id.clone(), c.distance)) {
-                if next_dist < ep_dist {
-                    ep = next_id;
-                    ep_dist = next_dist;
+            // Add reverse connections
+            for neighbor_id in neighbors {
+                if let Some(neighbor) = nodes.get_mut(&neighbor_id) {
+                    while neighbor.connections.len() <= layer {
+                        neighbor.connections.push(Vec::new());
+                    }
+                    if !neighbor.connections[layer].contains(&temporal.vector.id) {
+                        neighbor.connections[layer].push(temporal.vector.id.clone());
+                    }
                 }
             }
-
-            current_layer -= 1;
         }
 
-        // Insert connections at each layer
-        for layer in 0..=max_layer {
-            let neighbors = self.search_layer(
-                &nodes,
-                &ep,
-                &temporal.vector,
-                self.config.ef_construction,
-                layer,
-            ).await?;
-
-            let selected = self.select_neighbors(
-                &nodes,
-                &neighbors,
-                self.config.max_connections,
-                temporal_score,
-            );
-
-            // Add bidirectional connections
-            let node_id = temporal.vector.id.clone();
-            for neighbor in selected {
-                nodes.get_mut(&neighbor)
-                    .ok_or_else(|| MemoryError::NotFound(neighbor.clone()))?
-                    .connections[layer].push(node_id.clone());
-                nodes.get_mut(&node_id)
-                    .ok_or_else(|| MemoryError::NotFound(node_id.clone()))?
-                    .connections[layer].push(neighbor);
-            }
+        // Update entry points if needed
+        if entry_points.len() <= max_layer {
+            entry_points.resize(max_layer + 1, temporal.vector.id.clone());
         }
 
-        // Update entry point if necessary
-        if max_layer > entry_points.len() - 1 {
-            entry_points.push(temporal.vector.id.clone());
-        }
+        // Insert the new node
+        nodes.insert(temporal.vector.id.clone(), new_node);
 
-        tracing::debug!("Inserted vector {} at layer {}", temporal.vector.id, max_layer);
         Ok(())
     }
 
-    /// Search for nearest neighbors
     pub async fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
+        self.validate_dimensions(query)?;
+
         let nodes = self.nodes.read().await;
         let entry_points = self.entry_points.read().await;
 
@@ -179,185 +203,206 @@ impl TemporalHNSW {
             return Ok(Vec::new());
         }
 
-        let mut current_layer = entry_points.len() - 1;
-        let mut ep = entry_points[current_layer].clone();
-        let query_vector = Vector::new("query".into(), query.to_vec());
-        let mut ep_dist = self.calculate_distance(&nodes[&ep].vector, &query_vector)?;
+        let candidates = if let Some(ep) = entry_points.last() {
+            self.search_layer(
+                &*nodes,
+                query,
+                Some(ep),
+                self.config.ef_search,
+                0,
+            ).await?
+        } else {
+            Vec::new()
+        };
 
-        // Search through layers
-        while current_layer > 0 {
-            let next_ep = self.search_layer(
-                &nodes,
-                &ep,
-                &query_vector,
-                1,
-                current_layer,
-            ).await?;
+        // Convert candidates to final results
+        let mut scored_candidates: Vec<_> = candidates.into_iter()
+            .map(|c| {
+                let temporal_weight = self.config.temporal_weight;
+                let score = (1.0 - temporal_weight) * c.distance + 
+                           temporal_weight * (1.0 - c.temporal_score);
+                (c.id, score, c.temporal_score)
+            })
+            .collect();
 
-            if let Some((next_id, next_dist)) = next_ep.first().map(|c| (c.id.clone(), c.distance)) {
-                if next_dist < ep_dist {
-                    ep = next_id;
-                    ep_dist = next_dist;
-                }
-            }
-
-            current_layer -= 1;
-        }
-
-        // Get final candidates
-        let mut candidates = self.search_layer(
-            &nodes,
-            &ep,
-            &query_vector,
-            k,
-            0,
-        ).await?;
-
-        // Calculate max distance for normalization
-        let max_dist = candidates.iter()
-            .map(|c| c.distance)
-            .fold(0./0., f32::max);
-
-        // Sort by combined score (distance and temporal)
-        candidates.sort_by(|a, b| {
-            if self.config.temporal_weight > 0.0 {
-                let a_time_score = nodes[&a.id]._temporal_score;
-                let b_time_score = nodes[&b.id]._temporal_score;
-                
-                // Normalize distance scores to [0, 1] range
-                let a_dist_score = a.distance / max_dist;
-                let b_dist_score = b.distance / max_dist;
-                
-                // Combine scores with temporal weight
-                let a_score = (1.0 - a_dist_score) * (1.0 - self.config.temporal_weight)
-                    + a_time_score * self.config.temporal_weight;
-                let b_score = (1.0 - b_dist_score) * (1.0 - self.config.temporal_weight)
-                    + b_time_score * self.config.temporal_weight;
-                    
-                // Sort in descending order (higher scores are better)
-                b_score.partial_cmp(&a_score).unwrap_or(std::cmp::Ordering::Equal)
-            } else {
-                // Pure distance-based sorting (lower distances are better)
-                a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal)
-            }
+        // Sort by combined score
+        scored_candidates.sort_by(|a, b| {
+            let (_, a_score, _) = a;
+            let (_, b_score, _) = b;
+            a_score.partial_cmp(b_score).unwrap()
         });
-
-        Ok(candidates.into_iter()
-            .take(k)
-            .map(|c| (c.id, c.distance))
+        
+        // Truncate and convert back to original format
+        scored_candidates.truncate(k);
+        Ok(scored_candidates.into_iter()
+            .map(|(id, score, _)| (id, score))
             .collect())
+    }
+
+    fn temporal_score(&self, id: &str, now: SystemTime, nodes: &HashMap<String, Node>) -> f32 {
+        if let Some(node) = nodes.get(id) {
+            let age = now.duration_since(node.timestamp)
+                .unwrap_or(Duration::from_secs(0))
+                .as_secs_f32();
+            (-0.1 * age).exp()  // Exponential decay: 1.0 for now, decaying over time
+        } else {
+            0.0
+        }
     }
 
     async fn search_layer(
         &self,
         nodes: &HashMap<String, Node>,
-        entry_point: &str,
-        query: &Vector,
+        query: &[f32],
+        entry_point: Option<&String>,
         ef: usize,
         layer: usize,
     ) -> Result<Vec<Candidate>> {
+        use std::collections::BinaryHeap;
+
         let mut visited = HashMap::new();
         let mut candidates = BinaryHeap::new();
-        let mut results = BinaryHeap::new();
+        let mut best_candidates = BinaryHeap::new();
 
-        // Initialize with entry point
-        let dist = self.calculate_distance(&nodes[entry_point].vector, query)?;
-        candidates.push(Candidate {
-            id: entry_point.to_string(),
-            distance: dist,
-        });
-        results.push(Candidate {
-            id: entry_point.to_string(),
-            distance: dist,
-        });
-        visited.insert(entry_point.to_string(), dist);
+        if let Some(ep) = entry_point {
+            if let Some(node) = nodes.get(ep) {
+                if layer < node.connections.len() {
+                    let dist = self.distance_metric.calculate_distance(&node.vector, query);
+                    visited.insert(ep.clone(), dist);
+                    let candidate = Candidate {
+                        id: ep.clone(),
+                        distance: dist,
+                        temporal_score: node.temporal_score,
+                    };
+                    candidates.push(candidate.clone());
+                    best_candidates.push(candidate);
+                }
+            }
+        }
 
         while let Some(current) = candidates.pop() {
-            if results.peek().map_or(false, |best| current.distance > best.distance) {
-                break;
+            let worst_candidate = best_candidates.peek();
+            if let Some(worst) = worst_candidate {
+                // Use weighted score for comparison
+                let temporal_weight = self.config.temporal_weight;
+                let current_score = (1.0 - temporal_weight) * current.distance + 
+                                  temporal_weight * (1.0 - current.temporal_score);
+                let worst_score = (1.0 - temporal_weight) * worst.distance + 
+                                temporal_weight * (1.0 - worst.temporal_score);
+                if current_score > worst_score {
+                    break;
+                }
             }
 
-            // Check connections at current layer
-            for neighbor_id in &nodes[&current.id].connections[layer] {
-                if !visited.contains_key(neighbor_id) {
-                    let dist = self.calculate_distance(&nodes[neighbor_id].vector, query)?;
-                    visited.insert(neighbor_id.clone(), dist);
-
-                    if results.len() < ef || dist < results.peek().unwrap().distance {
-                        candidates.push(Candidate {
-                            id: neighbor_id.clone(),
-                            distance: dist,
-                        });
-                        results.push(Candidate {
-                            id: neighbor_id.clone(),
-                            distance: dist,
-                        });
-
-                        if results.len() > ef {
-                            results.pop();
+            if let Some(node) = nodes.get(&current.id) {
+                if layer < node.connections.len() {
+                    for neighbor_id in &node.connections[layer] {
+                        if !visited.contains_key(neighbor_id) {
+                            if let Some(neighbor) = nodes.get(neighbor_id) {
+                                let dist = self.distance_metric.calculate_distance(&neighbor.vector, query);
+                                visited.insert(neighbor_id.clone(), dist);
+                                
+                                let candidate = Candidate {
+                                    id: neighbor_id.clone(),
+                                    distance: dist,
+                                    temporal_score: neighbor.temporal_score,
+                                };
+                                
+                                // Use weighted score for comparison
+                                let temporal_weight = self.config.temporal_weight;
+                                let candidate_score = (1.0 - temporal_weight) * dist + 
+                                                    temporal_weight * (1.0 - candidate.temporal_score);
+                                let should_add = if best_candidates.len() < ef {
+                                    true
+                                } else {
+                                    let worst = best_candidates.peek().unwrap();
+                                    let worst_score = (1.0 - temporal_weight) * worst.distance + 
+                                                    temporal_weight * (1.0 - worst.temporal_score);
+                                    candidate_score < worst_score
+                                };
+                                
+                                if should_add {
+                                    candidates.push(candidate.clone());
+                                    best_candidates.push(candidate);
+                                    if best_candidates.len() > ef {
+                                        best_candidates.pop();
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        Ok(results.into_sorted_vec())
-    }
-
-    fn select_neighbors(
-        &self,
-        nodes: &HashMap<String, Node>,
-        candidates: &[Candidate],
-        m: usize,
-        temporal_score: f32,
-    ) -> Vec<String> {
-        let mut selected = Vec::new();
-        let mut remaining: Vec<_> = candidates.iter().collect();
-
-        while selected.len() < m && !remaining.is_empty() {
-            // Find best candidate considering both distance and temporal score
-            let (idx, _) = remaining.iter().enumerate()
-                .min_by(|(_, a), (_, b)| {
-                    let a_score = a.distance * (1.0 - self.config.temporal_weight)
-                        + nodes[&a.id]._temporal_score * self.config.temporal_weight;
-                    let b_score = b.distance * (1.0 - self.config.temporal_weight)
-                        + nodes[&b.id]._temporal_score * self.config.temporal_weight;
-                    a_score.partial_cmp(&b_score).unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .unwrap();
-
-            let best = remaining.remove(idx);
-            selected.push(best.id.clone());
-        }
-
-        selected
-    }
-
-    fn calculate_temporal_score(&self, temporal: &TemporalVector) -> f32 {
-        let now = std::time::SystemTime::now();
-        let age = now.duration_since(temporal.attributes.timestamp)
-            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-            .as_secs_f32();
-
-        let time_factor = (-temporal.attributes.decay_rate * age).exp();
-        time_factor * temporal.attributes.importance
-    }
-
-    fn calculate_distance(&self, a: &Vector, b: &Vector) -> Result<f32> {
-        if a.data.len() != b.data.len() {
-            return Err(MemoryError::DimensionMismatch {
-                expected: a.data.len(),
-                actual: b.data.len(),
-            });
-        }
-        Ok(1.0 - self.metric.similarity(&a.data, &b.data))
+        let mut result: Vec<_> = best_candidates.into_iter().collect();
+        result.sort_by(|a, b| {
+            // Use weighted score for final sorting
+            let temporal_weight = self.config.temporal_weight;
+            let a_score = (1.0 - temporal_weight) * a.distance + 
+                         temporal_weight * (1.0 - a.temporal_score);
+            let b_score = (1.0 - temporal_weight) * b.distance + 
+                         temporal_weight * (1.0 - b.temporal_score);
+            a_score.partial_cmp(&b_score).unwrap()
+        });
+        Ok(result)
     }
 
     fn get_random_layer(&self) -> usize {
         let mut layer = 0;
-        while layer < self.config.max_layers - 1 && rand::random::<f32>() < 0.5 {
+        while random::<f32>() < 0.5 && layer < self.config.max_dimensions {
             layer += 1;
         }
         layer
     }
+
+    fn validate_dimensions(&self, vector: &[f32]) -> Result<()> {
+        if vector.len() != self.config.max_dimensions {
+            return Err(MemoryError::InvalidDimensions {
+                got: vector.len(),
+                expected: self.config.max_dimensions,
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn get_layer_stats(&self) -> Result<LayerStats> {
+        let nodes = self.nodes.read().await;
+        let mut layer_sizes = HashMap::new();
+        let mut total_connections = 0;
+
+        for (_, node) in nodes.iter() {
+            let layer = node.layer;
+            *layer_sizes.entry(layer).or_insert(0) += 1;
+            total_connections += node.connections.iter().map(|c| c.len()).sum::<usize>();
+        }
+
+        let num_layers = if layer_sizes.is_empty() { 0 } else {
+            layer_sizes.keys().max().unwrap_or(&0) + 1
+        };
+
+        let total_nodes = nodes.len();
+        let avg_connections = if total_nodes > 0 {
+            total_connections as f64 / total_nodes as f64
+        } else {
+            0.0
+        };
+
+        Ok(LayerStats {
+            num_layers,
+            total_nodes,
+            total_connections,
+            avg_connections,
+            layer_sizes,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct LayerStats {
+    pub num_layers: usize,
+    pub total_nodes: usize,
+    pub total_connections: usize,
+    pub avg_connections: f64,
+    pub layer_sizes: HashMap<usize, usize>,
 }
