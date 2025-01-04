@@ -3,7 +3,7 @@
 <div align="center">
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org)
-[[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](http://www.apache.org/licenses/LICENSE-2.0)
 [![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](docs/)
 [![Benchmarks](https://img.shields.io/badge/benchmarks-view-green.svg)](BENCHMARKS.md)
 
