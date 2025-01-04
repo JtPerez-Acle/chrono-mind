@@ -9,7 +9,7 @@ use crate::{
         config::MemoryConfig,
         error::{MemoryError, Result},
     },
-    storage::metrics::{CosineDistance, DistanceMetric},
+    storage::metrics::DistanceMetric,
     memory::types::TemporalVector,
 };
 
