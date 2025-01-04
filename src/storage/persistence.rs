@@ -3,9 +3,12 @@ use std::{
     fs::File,
     io::{BufReader, BufWriter},
     path::PathBuf,
+    sync::Arc,
+    time::Duration,
 };
 use opentelemetry::trace::Tracer;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::{
@@ -14,7 +17,8 @@ use crate::{
         error::{MemoryError, Result},
     },
     memory::{
-        types::{MemoryStats, TemporalVector},
+        traits::VectorStorage,
+        types::{MemoryStats, TemporalVector, ContextSummary},
     },
     utils::validation::{validate_vector_data, validate_vector_dimensions},
 };
@@ -43,14 +47,10 @@ impl PersistentStore {
     }
 
     pub fn save_memory(&mut self, memory: TemporalVector) -> Result<()> {
-        validate_vector_dimensions(&memory.vector, &self.config)?;
-        validate_vector_data(&memory.vector)?;
+        validate_vector_dimensions(&memory.vector.data, &self.config)?;
+        validate_vector_data(&memory.vector.data)?;
         self.memories.insert(memory.vector.id.clone(), memory);
         Ok(())
-    }
-
-    pub fn get_memory(&self, id: &str) -> Option<&TemporalVector> {
-        self.memories.get(id)
     }
 
     pub fn remove_memory(&mut self, id: &str) -> Option<TemporalVector> {
@@ -83,14 +83,14 @@ impl PersistentStore {
 /// In-memory storage backend implementation
 #[derive(Debug)]
 pub struct MemoryBackend {
-    store: PersistentStore,
+    store: Arc<RwLock<PersistentStore>>,
     tracer: opentelemetry::global::BoxedTracer,
 }
 
 impl Default for MemoryBackend {
     fn default() -> Self {
         Self {
-            store: PersistentStore::default(),
+            store: Arc::new(RwLock::new(PersistentStore::default())),
             tracer: opentelemetry::global::tracer("memory_backend"),
         }
     }
@@ -99,7 +99,7 @@ impl Default for MemoryBackend {
 impl MemoryBackend {
     pub fn new(config: MemoryConfig) -> Self {
         Self {
-            store: PersistentStore::new(config),
+            store: Arc::new(RwLock::new(PersistentStore::new(config))),
             tracer: opentelemetry::global::tracer("memory_backend"),
         }
     }
@@ -107,41 +107,137 @@ impl MemoryBackend {
     async fn save(&mut self, memory: &TemporalVector) -> Result<()> {
         let _span = self.tracer.start("save_memory");
         
-        validate_vector_dimensions(&memory.vector, &self.store.config)?;
-        validate_vector_data(&memory.vector)?;
+        validate_vector_dimensions(&memory.vector.data, &self.store.read().await.config)?;
+        validate_vector_data(&memory.vector.data)?;
 
         info!(memory_id = %memory.vector.id, "Saving memory vector");
-        self.store.save_memory(memory.clone())
+        self.store.write().await.save_memory(memory.clone())
     }
 
     async fn get(&self, id: &str) -> Result<Option<TemporalVector>> {
         let _span = self.tracer.start("get_memory");
-        Ok(self.store.get_memory(id).cloned())
+        Ok(self.store.read().await.memories.get(id).cloned())
     }
 
     async fn remove(&mut self, id: &str) -> Option<TemporalVector> {
         let _span = self.tracer.start("remove_memory");
-        self.store.remove_memory(id)
+        self.store.write().await.remove_memory(id)
     }
 
     async fn list(&self) -> Vec<TemporalVector> {
         let _span = self.tracer.start("list_memories");
-        self.store.list_memories().into_iter().cloned().collect()
+        self.store.read().await.list_memories().into_iter().cloned().collect()
     }
 
     async fn count(&self) -> usize {
         let _span = self.tracer.start("count_memories");
-        self.store.memory_count()
+        self.store.read().await.memory_count()
     }
 
     pub async fn save_to_file(&self, path: &PathBuf) -> Result<()> {
         let _span = self.tracer.start("save_to_file");
-        self.store.save_to_file(path)
+        self.store.read().await.save_to_file(path)
     }
 
     pub async fn load_from_file(&mut self, path: &PathBuf) -> Result<()> {
         let _span = self.tracer.start("load_from_file");
-        self.store.load_from_file(path)
+        self.store.write().await.load_from_file(path)
+    }
+}
+
+#[async_trait::async_trait]
+impl VectorStorage for MemoryBackend {
+    async fn insert_memory(&self, memory: TemporalVector) -> Result<()> {
+        let mut store = self.store.write().await;
+        store.save_memory(memory)
+    }
+
+    async fn get_memory(&self, id: &str) -> Result<Option<TemporalVector>> {
+        let store = self.store.read().await;
+        Ok(store.memories.get(id).cloned())
+    }
+
+    async fn search_by_context(&self, context: &str, limit: usize) -> Result<Vec<TemporalVector>> {
+        let store = self.store.read().await;
+        let mut memories: Vec<_> = store.memories.values()
+            .filter(|m| m.attributes.context == context)
+            .cloned()
+            .collect();
+        memories.sort_by(|a, b| b.attributes.importance.partial_cmp(&a.attributes.importance).unwrap());
+        Ok(memories.into_iter().take(limit).collect())
+    }
+
+    async fn get_important_memories(&self, threshold: f32) -> Result<Vec<TemporalVector>> {
+        let store = self.store.read().await;
+        Ok(store.memories.values()
+            .filter(|m| m.attributes.importance >= threshold)
+            .cloned()
+            .collect())
+    }
+
+    async fn get_related_memories(&self, id: &str) -> Result<Vec<TemporalVector>> {
+        let store = self.store.read().await;
+        if let Some(memory) = store.memories.get(id) {
+            Ok(store.memories.values()
+                .filter(|m| m.vector.id != id && m.attributes.context == memory.attributes.context)
+                .cloned()
+                .collect())
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn apply_decay(&self, duration: Duration) -> Result<()> {
+        let mut store = self.store.write().await;
+        let decay_rate = store.config.base_decay_rate;
+        for memory in store.memories.values_mut() {
+            memory.attributes.importance *= (-duration.as_secs_f32() * decay_rate).exp();
+        }
+        Ok(())
+    }
+
+    async fn consolidate_memories(&self, time_window: Duration) -> Result<()> {
+        let mut store = self.store.write().await;
+        let now = std::time::SystemTime::now();
+        let mut to_remove = Vec::new();
+        
+        for (id, memory) in store.memories.iter() {
+            if memory.attributes.importance < store.config.min_importance {
+                if let Ok(age) = now.duration_since(memory.created_at) {
+                    if age > time_window {
+                        to_remove.push(id.clone());
+                    }
+                }
+            }
+        }
+        
+        for id in to_remove {
+            store.memories.remove(&id);
+        }
+        
+        Ok(())
+    }
+
+    async fn get_context_summary(&self, context: &str) -> Result<Option<ContextSummary>> {
+        let store = self.store.read().await;
+        let memories: Vec<_> = store.memories.values()
+            .filter(|m| m.attributes.context == context)
+            .collect();
+            
+        if memories.is_empty() {
+            return Ok(None);
+        }
+        
+        let count = memories.len();
+        let importance = memories.iter()
+            .map(|m| m.attributes.importance)
+            .sum::<f32>() / count as f32;
+            
+        Ok(Some(ContextSummary {
+            context: context.to_string(),
+            memory_count: count,
+            importance,
+        }))
     }
 }
 
@@ -209,7 +305,8 @@ impl StorageBackend for MemoryBackend {
 
     #[tracing::instrument(skip(self))]
     async fn get_stats(&self) -> Result<MemoryStats> {
-        let memories = self.store.memories.values();
+        let store = self.store.read().await;
+        let memories = store.memories.values();
         let total_memories = memories.len();
         let mut total_importance = 0.0;
         let mut total_size = 0;

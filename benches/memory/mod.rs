@@ -1,84 +1,101 @@
-use criterion::{black_box, Criterion};
-use std::sync::Arc;
-use vector_store::{
-    core::{
-        config::MemoryConfig,
-    },
-    memory::{
-        temporal::MemoryStorage,
-        types::{Vector, TemporalVector, MemoryAttributes},
-    },
-    storage::metrics::CosineDistance,
+use criterion::{black_box, criterion_group, Criterion};
+use chrono_mind::{
+    core::config::MemoryConfig,
+    memory::{types::{MemoryAttributes, TemporalVector, Vector}, traits::VectorStorage},
+    storage::persistence::MemoryBackend,
 };
-use crate::{RUNTIME, common::{config, generate_random_vectors, generate_timestamps}};
+use rand::prelude::*;
+use rand_xoshiro::Xoshiro256PlusPlus;
+use std::time::{Duration, SystemTime};
+use tokio::runtime::Runtime;
+
+const MEMORY_DIMS: usize = 768;
+const BATCH_SIZES: [usize; 4] = [1, 10, 100, 1000];
+
+fn generate_memory(rng: &mut impl RngCore) -> TemporalVector {
+    let vector = Vector::new(
+        format!("mem_{}", rng.gen::<u64>()),
+        (0..MEMORY_DIMS).map(|_| rng.gen()).collect(),
+    );
+    
+    let attributes = MemoryAttributes {
+        timestamp: SystemTime::now(),
+        importance: rng.gen_range(0.0..1.0),
+        context: format!("context_{}", rng.gen::<u8>()),
+        decay_rate: rng.gen_range(0.1..0.5),
+        relationships: vec![],
+        access_count: 0,
+        last_access: SystemTime::now(),
+    };
+    
+    TemporalVector::new(vector, attributes)
+}
 
 pub fn bench_memory_operations(c: &mut Criterion) {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
+    let config = MemoryConfig::default();
+    let rt = Runtime::new().unwrap();
+    
     let mut group = c.benchmark_group("memory_operations");
+    group.measurement_time(Duration::from_secs(10));
     
-    // Setup memory storage with real-world configuration
-    let mut store = RUNTIME.block_on(async {
-        let metric = Arc::new(CosineDistance::new());
-        MemoryStorage::new(MemoryConfig::default(), metric)
+    // Benchmark insertion
+    for &batch_size in &BATCH_SIZES {
+        group.bench_with_input(format!("insert_{}", batch_size), &batch_size, |b, &size| {
+            let memories: Vec<_> = (0..size)
+                .map(|_| generate_memory(&mut rng))
+                .collect();
+            
+            b.iter(|| {
+                let backend = black_box(MemoryBackend::new(config.clone()));
+                for memory in &memories {
+                    rt.block_on(async {
+                        backend.insert_memory(memory.clone()).await.unwrap();
+                    });
+                }
+            });
+        });
+    }
+    
+    // Benchmark retrieval
+    let backend = MemoryBackend::new(config.clone());
+    let memory = generate_memory(&mut rng);
+    let id = memory.vector.id.clone();
+    rt.block_on(async {
+        backend.insert_memory(memory.clone()).await.unwrap();
     });
     
-    // Generate test data
-    let test_vectors = generate_random_vectors(config::SMALL_DATASET, config::DIMS);
-    let timestamps = generate_timestamps(config::SMALL_DATASET);
-    
-    // Initialize with test data
-    RUNTIME.block_on(async {
-        for (i, (vec, timestamp)) in test_vectors.iter().zip(timestamps.iter()).enumerate() {
-            let importance = config::IMPORTANCE_RANGES[i % config::IMPORTANCE_RANGES.len()];
-            let vector = Vector::new(
-                format!("test_{}", i),
-                vec.clone(),
-            );
-            let attrs = MemoryAttributes {
-                timestamp: *timestamp,
-                importance,
-                context: format!("context_{}", i % 10),
-                decay_rate: 0.1,
-                relationships: Vec::new(),
-                access_count: 0,
-                last_access: std::time::SystemTime::now(),
-            };
-            let temporal = TemporalVector::new(vector, attrs);
-            let _ = store.save_memory(temporal).await;
-        }
-    });
-    
-    // Benchmark memory save operations
-    group.bench_function("save_memory", |b| {
+    group.bench_function("get_memory", |b| {
         b.iter(|| {
-            let vector = Vector::new(
-                "bench_test".to_string(),
-                generate_random_vectors(1, config::DIMS)[0].clone(),
-            );
-            let attrs = MemoryAttributes {
-                timestamp: std::time::SystemTime::now(),
-                importance: 1.0,
-                context: "bench_context".to_string(),
-                decay_rate: 0.1,
-                relationships: Vec::new(),
-                access_count: 0,
-                last_access: std::time::SystemTime::now(),
-            };
-            let temporal = TemporalVector::new(vector, attrs);
-            RUNTIME.block_on(async {
-                let _ = black_box(store.save_memory(temporal).await);
+            rt.block_on(async {
+                black_box(backend.get_memory(&id).await.unwrap());
             });
         });
     });
     
-    // Benchmark vector similarity search
-    group.bench_function("search_similar", |b| {
-        let query = generate_random_vectors(1, config::DIMS)[0].clone();
+    // Benchmark search
+    let backend = MemoryBackend::new(config.clone());
+    for _ in 0..100 {
+        rt.block_on(async {
+            backend.insert_memory(generate_memory(&mut rng)).await.unwrap();
+        });
+    }
+    
+    group.bench_function("search_context", |b| {
         b.iter(|| {
-            RUNTIME.block_on(async {
-                let _ = black_box(store.search_similar(&query, 10).await);
+            rt.block_on(async {
+                black_box(backend.search_by_context("context_1", 10).await.unwrap());
             });
         });
     });
     
     group.finish();
+}
+
+criterion_group! {
+    name = memory;
+    config = Criterion::default()
+        .sample_size(100)
+        .measurement_time(Duration::from_secs(10));
+    targets = bench_memory_operations
 }

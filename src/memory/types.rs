@@ -94,10 +94,8 @@ impl TemporalVector {
 #[derive(Debug, Serialize)]
 pub struct ContextSummary {
     pub context: String,
-    pub importance: f32,
     pub memory_count: usize,
-    pub average_vector: Vec<f32>,
-    pub key_relationships: Vec<String>,
+    pub importance: f32,
 }
 
 /// Statistics about the memory storage

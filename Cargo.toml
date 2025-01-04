@@ -1,14 +1,15 @@
 [package]
-name = "vector-store"
+name = "chrono-mind"
 version = "0.1.0"
 edition = "2021"
-description = "High-performance vector storage implementation"
-authors = ["Vector Store Team"]
+description = "ChronoMind: Redefining Vector Intelligence Through Time"
+authors = ["JT Perez-Acle"]
 
 [dependencies]
 # Logging and tracing
-tracing = { version = "0.1", features = ["attributes"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing = "0.1"
+tracing-opentelemetry = "0.21"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
 # Error handling
@@ -16,7 +17,7 @@ thiserror = "1.0"
 anyhow = "1.0"
 
 # Async runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.0", features = ["full"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -32,6 +33,7 @@ async-trait = "0.1"
 # Random number generation
 rand = "0.8"
 rand_distr = "0.4"
+rand_xoshiro = "0.6"  # Fast random number generation
 
 # Lazy initialization
 once_cell = "1.19.0"
@@ -43,28 +45,56 @@ futures = "0.3"
 rayon = "1.8"
 
 # OpenTelemetry
-opentelemetry = { version = "0.20" }
+opentelemetry = { version = "0.20", features = ["rt-tokio"] }
 opentelemetry_sdk = { version = "0.20" }
-opentelemetry-otlp = { version = "0.13" }
+opentelemetry-otlp = { version = "0.13", features = ["tonic"] }
+
+# Neural network and optimization
+ndarray = "0.15"
+ndarray-stats = "0.5"
+smartcore = "0.3"
+linfa = "0.7"
+linfa-clustering = "0.6"
+half = "2.3"  # For FP16 support
+
+# Linear algebra and complex numbers
+num-complex = "0.4"
+nalgebra = "0.32"
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports", "async_futures"] }
+iai = "0.1"  # Instruction count based benchmarking
+criterion-cycles-per-byte = "0.5"
+colored = "2.0"
+indicatif = { version = "0.17", features = ["rayon"] }
+
+# Visualization
+plotters = "0.3"
+tabled = "0.14"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-indicatif = "0.17"
-colored = "2.0"
-proptest = "1.4"
+criterion = "0.5"
+proptest = "1.2"
+quickcheck = "1.0"
+test-case = "3.3"
 test-log = "0.2"
 tokio-test = "0.4"
-env_logger = "0.10"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-chrono = "0.4"
-plotters = "0.3"
 
 [[bench]]
 name = "main"
-harness = false
 path = "benches/main.rs"
+harness = false
 
-[[test]]
-name = "integration"
-path = "tests/integration/mod.rs"
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = true  # Keep debug symbols for profiling
+
+[profile.bench]
+opt-level = 3
+debug = true
+lto = "fat"
+codegen-units = 1
+incremental = false
