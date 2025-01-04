@@ -1,95 +1,153 @@
-use std::time::Instant;
-use tracing::info;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use opentelemetry::{
+    metrics::{Counter, Histogram, Meter, MeterProvider, Unit},
+    KeyValue,
+};
+use opentelemetry_sdk::metrics::MeterProvider as SdkMeterProvider;
+use parking_lot::RwLock;
+use tracing::{debug, warn};
 
 use crate::memory::types::MemoryStats;
 
-/// Performance monitoring utility
+#[derive(Clone, Debug)]
+pub struct MetricsRegistry {
+    meter: Meter,
+    operation_duration: Histogram<f64>,
+    memory_usage: Counter<u64>,
+    vector_ops: Counter<u64>,
+}
+
+impl Default for MetricsRegistry {
+    fn default() -> Self {
+        let provider = SdkMeterProvider::builder().build();
+        let meter = provider.meter("vector_store");
+        
+        let operation_duration = meter
+            .f64_histogram("operation_duration")
+            .with_description("Duration of operations in milliseconds")
+            .with_unit(Unit::new("ms"))
+            .init();
+
+        let memory_usage = meter
+            .u64_counter("memory_usage")
+            .with_description("Memory usage in bytes")
+            .with_unit(Unit::new("bytes"))
+            .init();
+
+        let vector_ops = meter
+            .u64_counter("vector_operations")
+            .with_description("Number of vector operations")
+            .init();
+
+        Self {
+            meter,
+            operation_duration,
+            memory_usage,
+            vector_ops,
+        }
+    }
+}
+
+impl MetricsRegistry {
+    pub fn record_operation_duration(&self, operation: &str, duration: Duration) {
+        let attributes = &[KeyValue::new("operation", operation.to_string())];
+        self.operation_duration.record(duration.as_secs_f64() * 1000.0, attributes);
+        debug!("Operation {} took {:?}", operation, duration);
+    }
+
+    pub fn record_memory_usage(&self, bytes: u64, context: &str) {
+        let attributes = &[KeyValue::new("context", context.to_string())];
+        self.memory_usage.add(bytes, attributes);
+        debug!("Memory usage for {}: {} bytes", context, bytes);
+    }
+
+    pub fn record_vector_operation(&self, operation_type: &str) {
+        let attributes = &[KeyValue::new("type", operation_type.to_string())];
+        self.vector_ops.add(1, attributes);
+        debug!("Vector operation recorded: {}", operation_type);
+    }
+}
+
+#[derive(Debug)]
 pub struct PerformanceMonitor {
     name: String,
     start: Instant,
+    metrics: Arc<MetricsRegistry>,
 }
 
 impl PerformanceMonitor {
-    /// Create a new performance monitor
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: &str, metrics: Arc<MetricsRegistry>) -> Self {
         Self {
             name: name.to_string(),
             start: Instant::now(),
+            metrics,
         }
+    }
+
+    pub fn record_metric(&self, value: f64, attributes: &[KeyValue]) {
+        self.metrics.operation_duration.record(value, attributes);
+        debug!("Metric recorded for {}: {}", self.name, value);
     }
 }
 
 impl Drop for PerformanceMonitor {
     fn drop(&mut self) {
         let duration = self.start.elapsed();
-        info!(
-            operation = self.name,
-            duration_ms = duration.as_millis(),
-            "Operation completed"
-        );
+        self.metrics.record_operation_duration(&self.name, duration);
     }
 }
 
-/// Monitor memory system health
-pub fn monitor_memory_health(stats: &MemoryStats, capacity_warning_threshold: f32) {
-    info!(
-        total_memories = stats.total_memories,
-        capacity_used = stats.capacity_used,
-        average_importance = stats.average_importance,
-        "Memory system health"
-    );
+#[derive(Debug)]
+pub struct MemoryMonitor {
+    metrics: Arc<MetricsRegistry>,
+    stats: Arc<RwLock<MemoryStats>>,
+    leak_threshold: usize,
+}
 
-    if stats.capacity_used > capacity_warning_threshold {
-        info!(
-            capacity_used = stats.capacity_used,
-            threshold = capacity_warning_threshold,
-            "Memory system capacity warning"
-        );
+impl MemoryMonitor {
+    pub fn new(metrics: Arc<MetricsRegistry>, stats: Arc<RwLock<MemoryStats>>, leak_threshold: usize) -> Self {
+        Self {
+            metrics,
+            stats,
+            leak_threshold,
+        }
     }
 
-    // Log context distribution
-    for (context, count) in &stats.context_distribution {
-        info!(
-            context = context,
-            count = count,
-            "Context distribution"
-        );
+    pub fn check_memory_usage(&self, used_bytes: u64, context: &str) {
+        self.metrics.record_memory_usage(used_bytes, context);
+
+        if used_bytes > self.leak_threshold as u64 {
+            warn!(
+                "Memory usage exceeds threshold in {}: {} bytes (threshold: {})",
+                context, used_bytes, self.leak_threshold
+            );
+        }
+    }
+
+    pub fn monitor_health(&self) {
+        let stats = self.stats.read();
+        let attributes = &[
+            KeyValue::new("total_memories", stats.total_memories as i64),
+            KeyValue::new("capacity_used", stats.capacity_used as f64),
+        ];
+
+        self.metrics.memory_usage.add(stats.capacity_used as u64, attributes);
+
+        if stats.capacity_used > (self.leak_threshold as f64) {
+            warn!(
+                capacity_used = stats.capacity_used,
+                threshold = self.leak_threshold,
+                "Potential memory leak detected"
+            );
+        }
     }
 }
 
-/// Efficiency metrics for memory system
-pub struct EfficiencyMetrics {
-    pub memory_utilization: f32,
-    pub context_balance: f32,
-    pub relationship_density: f32,
-}
-
-/// Calculate efficiency metrics for memory system
-pub fn calculate_efficiency_metrics(stats: &MemoryStats) -> EfficiencyMetrics {
-    // Calculate memory utilization
-    let memory_utilization = stats.capacity_used / 100.0;
-
-    // Calculate context balance (variance in context sizes)
-    let avg_context_size = stats.total_memories as f32 / stats.context_distribution.len() as f32;
-    let context_balance = stats.context_distribution.values()
-        .map(|&count| {
-            let diff = count as f32 - avg_context_size;
-            diff * diff
-        })
-        .sum::<f32>()
-        .sqrt();
-
-    // Calculate relationship density
-    let total_possible_relationships = stats.total_memories * (stats.total_memories - 1) / 2;
-    let relationship_density = if total_possible_relationships > 0 {
-        stats.most_connected_memories.len() as f32 / total_possible_relationships as f32
-    } else {
-        0.0
-    };
-
-    EfficiencyMetrics {
-        memory_utilization,
-        context_balance,
-        relationship_density,
-    }
+pub fn calculate_efficiency_metrics(total_ops: u64, duration: Duration, memory_used: u64) -> f64 {
+    let ops_per_second = total_ops as f64 / duration.as_secs_f64();
+    let memory_efficiency = ops_per_second / memory_used as f64;
+    memory_efficiency
 }

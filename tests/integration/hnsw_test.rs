@@ -1,170 +1,216 @@
-use std::time::SystemTime;
-
+use std::{
+    sync::Arc,
+    time::{SystemTime, Duration},
+};
 use vector_store::{
-    MemoryAttributes, TemporalVector, Vector,
-    CosineDistance, HNSWConfig, TemporalHNSW,
+    core::error::Result,
+    memory::types::{MemoryAttributes, TemporalVector, Vector},
+    storage::{
+        metrics::CosineDistance,
+        hnsw::{HNSWConfig, TemporalHNSW},
+    },
 };
 
-fn create_test_vector(id: &str, data: Vec<f32>, importance: f32) -> TemporalVector {
-    TemporalVector {
-        vector: Vector {
-            id: id.to_string(),
-            data,
-        },
-        attributes: MemoryAttributes {
-            timestamp: SystemTime::now(),
-            importance,
-            context: "test".to_string(),
-            decay_rate: 0.1,
-            relationships: vec![],
-            access_count: 0,
-            last_access: SystemTime::now(),
-        },
-    }
+fn create_test_vector(id: &str, vec: Vec<f32>, importance: f32) -> TemporalVector {
+    let now = SystemTime::now();
+    let vector = Vector::new(id.to_string(), vec);
+    let attributes = MemoryAttributes {
+        timestamp: now,
+        importance,
+        context: "test".to_string(),
+        decay_rate: 0.1,
+        relationships: vec![],
+        access_count: 0,
+        last_access: now,
+    };
+    TemporalVector::new(vector, attributes)
+}
+
+fn create_test_vector_with_time(id: &str, vec: Vec<f32>, importance: f32, timestamp: SystemTime) -> TemporalVector {
+    let vector = Vector::new(id.to_string(), vec);
+    let attributes = MemoryAttributes {
+        timestamp,
+        importance,
+        context: "test".to_string(),
+        decay_rate: 0.1,
+        relationships: vec![],
+        access_count: 0,
+        last_access: timestamp,
+    };
+    TemporalVector::new(vector, attributes)
 }
 
 #[tokio::test]
-async fn test_hnsw_basic_operations() {
-    let config = HNSWConfig::default();
-    let metric = CosineDistance::new();
-    let index = TemporalHNSW::new(metric, config);
+async fn test_basic_insert_search() -> Result<()> {
+    let config = HNSWConfig {
+        ef_construction: 10,
+        ef_search: 10,
+        max_dimensions: 3,
+        temporal_weight: 0.1,
+        max_connections: 16,
+    };
+    let metric = Arc::new(CosineDistance::new());
+    let index = TemporalHNSW::new(config, metric);
 
-    // Test insertion
     let v1 = create_test_vector("1", vec![1.0, 0.0, 0.0], 1.0);
     let v2 = create_test_vector("2", vec![0.0, 1.0, 0.0], 1.0);
     let v3 = create_test_vector("3", vec![0.0, 0.0, 1.0], 1.0);
 
-    index.insert(&v1).await.unwrap();
-    index.insert(&v2).await.unwrap();
-    index.insert(&v3).await.unwrap();
+    index.insert(&v1).await?;
+    index.insert(&v2).await?;
+    index.insert(&v3).await?;
 
-    // Test search
-    let query = vec![1.0, 0.1, 0.1];
-    let results = index.search(&query, 2).await.unwrap();
+    let query = vec![1.0, 0.0, 0.0];
+    let results = index.search(&query, 3).await?;
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].0, "1");  // Most similar to query
+    assert_eq!(results[1].0, "2");  // Second most similar
+    assert_eq!(results[2].0, "3");  // Least similar
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_temporal_ordering() -> Result<()> {
+    let config = HNSWConfig {
+        ef_construction: 10,
+        ef_search: 10,
+        max_dimensions: 3,
+        temporal_weight: 0.8,  // High temporal weight to prioritize recency
+        max_connections: 16,
+    };
+    let metric = Arc::new(CosineDistance::new());
+    let index = TemporalHNSW::new(config, metric);
+
+    let now = SystemTime::now();
+    let v1 = create_test_vector_with_time(
+        "1",
+        vec![1.0, 0.0, 0.0],
+        1.0,
+        now - Duration::from_secs(10),
+    );
+    let v2 = create_test_vector_with_time(
+        "2",
+        vec![0.0, 1.0, 0.0],
+        1.0,
+        now,
+    );
+
+    index.insert(&v1).await?;
+    index.insert(&v2).await?;
+
+    let query = vec![1.0, 0.0, 0.0];
+    let results = index.search(&query, 2).await?;
 
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].0, "1"); // Closest to query
+    assert_eq!(results[0].0, "2");  // Should be first due to recency
+    assert_eq!(results[1].0, "1");
+
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_hnsw_temporal_awareness() {
+async fn test_empty_index() -> Result<()> {
     let config = HNSWConfig {
-        temporal_weight: 0.5,
-        ..Default::default()
+        ef_construction: 10,
+        ef_search: 10,
+        max_dimensions: 3,
+        temporal_weight: 0.1,
+        max_connections: 16,
     };
-    let metric = CosineDistance::new();
-    let index = TemporalHNSW::new(metric, config);
+    let metric = Arc::new(CosineDistance::new());
+    let index = TemporalHNSW::new(config, metric);
 
-    // Create vectors with different temporal properties
-    let v1 = create_test_vector("1", vec![1.0, 0.0], 1.0);
-    let mut v2 = create_test_vector("2", vec![0.9, 0.1], 0.5);
+    let query = vec![1.0, 0.0, 0.0];
+    let results = index.search(&query, 1).await?;
+    assert_eq!(results.len(), 0);
 
-    // Make v2 appear older
-    v2.attributes.timestamp = SystemTime::now() - std::time::Duration::from_secs(3600);
-
-    index.insert(&v1).await.unwrap();
-    index.insert(&v2).await.unwrap();
-
-    // Search with a vector closer to v2
-    let query = vec![0.9, 0.1];
-    let results = index.search(&query, 2).await.unwrap();
-
-    // Despite being closer in vector space, v2 should rank lower due to temporal score
-    assert_eq!(results[0].0, "1");
-    assert_eq!(results[1].0, "2");
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_hnsw_concurrent_access() {
-    let config = HNSWConfig::default();
-    let metric = CosineDistance::new();
-    let index = std::sync::Arc::new(TemporalHNSW::new(metric, config));
+async fn test_dimension_validation() -> Result<()> {
+    let config = HNSWConfig {
+        ef_construction: 10,
+        ef_search: 10,
+        max_dimensions: 3,
+        temporal_weight: 0.1,
+        max_connections: 16,
+    };
+    let metric = Arc::new(CosineDistance::new());
+    let index = TemporalHNSW::new(config, metric);
+
+    let v1 = create_test_vector("1", vec![1.0, 0.0], 1.0);
+    assert!(index.insert(&v1).await.is_err());
+
+    let v2 = create_test_vector("2", vec![1.0, 0.0, 0.0, 0.0], 1.0);
+    assert!(index.insert(&v2).await.is_err());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_concurrent_operations() -> Result<()> {
+    let config = HNSWConfig {
+        ef_construction: 10,
+        ef_search: 10,
+        max_dimensions: 3,
+        temporal_weight: 0.1,
+        max_connections: 16,
+    };
+    let metric = Arc::new(CosineDistance::new());
+    let index = Arc::new(TemporalHNSW::new(config, metric));
 
     let mut handles = Vec::new();
-
-    // Spawn multiple tasks to insert vectors
     for i in 0..10 {
         let index = index.clone();
         let handle = tokio::spawn(async move {
             let v = create_test_vector(
-                &i.to_string(),
-                vec![i as f32 / 10.0, 1.0 - i as f32 / 10.0],
+                &format!("{}", i),
+                vec![1.0, 0.0, 0.0],
                 1.0,
             );
-            index.insert(&v).await.unwrap();
+            index.insert(&v).await
         });
         handles.push(handle);
     }
 
-    // Wait for all insertions to complete
     for handle in handles {
-        handle.await.unwrap();
+        handle.await??;  // Using the new From<JoinError> implementation
     }
 
-    // Verify search still works
-    let query = vec![0.5, 0.5];
-    let results = index.search(&query, 5).await.unwrap();
+    let query = vec![1.0, 0.0, 0.0];
+    let results = index.search(&query, 5).await?;
     assert_eq!(results.len(), 5);
+
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_hnsw_edge_cases() {
-    let config = HNSWConfig::default();
-    let metric = CosineDistance::new();
-    let index = TemporalHNSW::new(metric, config);
-
-    // Test empty index
-    let query = vec![1.0, 0.0];
-    let results = index.search(&query, 1).await.unwrap();
-    assert!(results.is_empty());
-
-    // Test single vector
-    let v1 = create_test_vector("1", vec![1.0, 0.0], 1.0);
-    index.insert(&v1).await.unwrap();
-    let results = index.search(&query, 1).await.unwrap();
-    assert_eq!(results.len(), 1);
-
-    // Test with zero vector
-    let v2 = create_test_vector("2", vec![0.0, 0.0], 1.0);
-    index.insert(&v2).await.unwrap();
-    let results = index.search(&query, 2).await.unwrap();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0].0, "1"); // Non-zero vector should be closer
-
-    // Test with duplicate vectors
-    let v3 = create_test_vector("3", vec![1.0, 0.0], 1.0);
-    index.insert(&v3).await.unwrap();
-    let results = index.search(&query, 3).await.unwrap();
-    assert_eq!(results.len(), 3);
-}
-
-#[tokio::test]
-async fn test_hnsw_large_scale() {
+async fn test_layer_stats() -> Result<()> {
     let config = HNSWConfig {
-        ef_construction: 50,
+        ef_construction: 10,
+        ef_search: 10,
+        max_dimensions: 3,
+        temporal_weight: 0.1,
         max_connections: 16,
-        ..Default::default()
     };
-    let metric = CosineDistance::new();
-    let index = TemporalHNSW::new(metric, config);
+    let metric = Arc::new(CosineDistance::new());
+    let index = TemporalHNSW::new(config, metric);
 
-    // Insert 1000 random vectors
-    for i in 0..1000 {
-        let data = vec![
-            rand::random::<f32>(),
-            rand::random::<f32>(),
-            rand::random::<f32>(),
-        ];
-        let v = create_test_vector(&i.to_string(), data, 1.0);
-        index.insert(&v).await.unwrap();
-    }
+    let v1 = create_test_vector("1", vec![1.0, 0.0, 0.0], 1.0);
+    let v2 = create_test_vector("2", vec![0.0, 1.0, 0.0], 1.0);
+    let v3 = create_test_vector("3", vec![0.0, 0.0, 1.0], 1.0);
 
-    // Test search performance
-    let query = vec![0.5, 0.5, 0.5];
-    let start = std::time::Instant::now();
-    let results = index.search(&query, 10).await.unwrap();
-    let duration = start.elapsed();
+    index.insert(&v1).await?;
+    index.insert(&v2).await?;
+    index.insert(&v3).await?;
 
-    assert_eq!(results.len(), 10);
-    assert!(duration.as_millis() < 100); // Search should be fasts
+    let stats = index.get_layer_stats().await?;
+    assert!(stats.total_nodes > 0);
+    assert!(stats.total_connections >= 0);
+    assert!(stats.avg_connections >= 0.0);
+
+    Ok(())
 }

@@ -1,277 +1,291 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::debug;
-
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
+use parking_lot::RwLock;
 use crate::{
     core::{
         config::MemoryConfig,
         error::{MemoryError, Result},
     },
-    memory::types::{ContextSummary, MemoryStats, TemporalVector},
-    storage::metrics::DistanceMetric,
-    utils::{
-        monitoring::PerformanceMonitor,
-        validation::{validate_dimensions, validate_temporal_vector},
-    },
+    storage::metrics::{CosineDistance, DistanceMetric},
+    memory::types::TemporalVector,
 };
 
-/// Thread-safe memory storage with temporal attributes
-#[derive(Clone)]
 pub struct MemoryStorage {
-    memories: Arc<RwLock<HashMap<String, TemporalVector>>>,
-    metric: Arc<dyn DistanceMetric>,
-    config: Arc<MemoryConfig>,
+    config: MemoryConfig,
+    memories: RwLock<HashMap<String, TemporalVector>>,
+    distance_metric: Arc<dyn DistanceMetric + Send + Sync>,
 }
 
 impl MemoryStorage {
-    /// Create a new memory storage instance
     pub fn new(
-        metric: impl DistanceMetric + 'static,
         config: MemoryConfig,
-    ) -> Result<Self> {
-        config.validate().map_err(MemoryError::ConfigError)?;
-
-        Ok(Self {
-            memories: Arc::new(RwLock::new(HashMap::new())),
-            metric: Arc::new(metric),
-            config: Arc::new(config),
-        })
+        distance_metric: Arc<dyn DistanceMetric + Send + Sync>,
+    ) -> Self {
+        Self {
+            memories: RwLock::new(HashMap::new()),
+            config,
+            distance_metric,
+        }
     }
 
-    /// Save a memory to storage
     pub async fn save_memory(&mut self, memory: TemporalVector) -> Result<()> {
-        let _monitor = PerformanceMonitor::new("save_memory");
-        
-        // Validate memory
-        validate_dimensions(&memory.vector, &self.config)?;
-        validate_temporal_vector(&memory)?;
-
-        let mut memories = self.memories.write().await;
-        
-        // Check capacity
-        if memories.len() >= self.config.max_memories && !memories.contains_key(&memory.vector.id) {
-            return Err(MemoryError::CapacityExceeded(format!(
-                "Maximum memories ({}) reached",
-                self.config.max_memories
-            )));
+        // Validate dimensions
+        if memory.vector.data.len() != self.config.max_dimensions {
+            return Err(MemoryError::InvalidDimensions {
+                got: memory.vector.data.len(),
+                expected: self.config.max_dimensions,
+            });
         }
 
-        memories.insert(memory.vector.id.clone(), memory);
-        debug!("Memory saved successfully");
+        // Validate importance
+        if memory.attributes.importance < 0.0 || memory.attributes.importance > 1.0 {
+            return Err(MemoryError::InvalidImportance(memory.attributes.importance));
+        }
+
+        let mut memories = self.memories.write();
+
+        // If memory already exists, merge relationships
+        if let Some(existing) = memories.get(&memory.vector.id) {
+            let mut updated = memory.clone();
+            let mut relationships: HashSet<_> = existing.attributes.relationships.iter().cloned().collect();
+            relationships.extend(updated.attributes.relationships.iter().cloned());
+            updated.attributes.relationships = relationships.into_iter().collect();
+            memories.insert(memory.vector.id.clone(), updated);
+        } else {
+            memories.insert(memory.vector.id.clone(), memory);
+        }
+
         Ok(())
     }
 
-    /// Get a memory by ID
     pub async fn get_memory(&self, id: &str) -> Result<Option<TemporalVector>> {
-        let _monitor = PerformanceMonitor::new("get_memory");
-        let mut memories = self.memories.write().await;
-        
-        if let Some(memory) = memories.get_mut(id) {
-            // Update access stats
-            memory.attributes.access_count += 1;
-            memory.attributes.last_access = std::time::SystemTime::now();
-            Ok(Some(memory.clone()))
-        } else {
-            Ok(None)
-        }
+        let memories = self.memories.read();
+        Ok(memories.get(id).cloned())
     }
 
-    /// Search for similar memories
-    pub async fn search_similar(&self, query: &[f32], limit: usize) -> Result<Vec<(TemporalVector, f32)>> {
-        let _monitor = PerformanceMonitor::new("search_similar");
-        let memories = self.memories.read().await;
+    pub async fn search_similar(&self, query: &[f32], k: usize) -> Result<Vec<(TemporalVector, f32)>> {
+        let memories = self.memories.read();
+        let now = SystemTime::now();
         
-        let mut results: Vec<_> = memories
-            .values()
-            .map(|memory| {
-                let similarity = self.metric.similarity(&memory.vector.data, query);
-                (memory.clone(), similarity)
+        // First calculate all distances
+        let results: Vec<_> = memories.values()
+            .map(|m| {
+                let distance = self.distance_metric.calculate_distance(&m.vector.data, query);
+                let time_diff = now.duration_since(m.attributes.timestamp)
+                    .unwrap_or(Duration::from_secs(0))
+                    .as_secs_f32();
+                
+                // Temporal score: more recent = higher score (closer to 1)
+                let temporal_score = (-self.config.base_decay_rate * time_diff).exp();
+                
+                (m.clone(), distance, temporal_score)
             })
             .collect();
-
-        results.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(results.into_iter().take(limit).collect())
-    }
-
-    /// Get memories by context
-    pub async fn get_memories_by_context(&self, context: &str) -> Result<Vec<TemporalVector>> {
-        let _monitor = PerformanceMonitor::new("get_memories_by_context");
-        let memories = self.memories.read().await;
         
-        Ok(memories
-            .values()
-            .filter(|m| m.attributes.context == context)
-            .cloned()
+        // Find max distance for normalization
+        let max_dist = results.iter()
+            .map(|(_, dist, _)| *dist)
+            .fold(0.0, f32::max);
+        
+        // Calculate combined scores
+        let mut scored_results: Vec<_> = results.into_iter()
+            .map(|(m, dist, temporal)| {
+                // Normalize distance to [0,1]
+                let dist_norm = if max_dist > 0.0 { dist / max_dist } else { 0.0 };
+                
+                // Weight-based scoring:
+                // - base_decay_rate determines influence of temporal score
+                // - importance has a fixed weight
+                let temporal_weight = self.config.base_decay_rate;
+                let importance_weight = 0.3;  // Fixed weight for importance
+                let distance_weight = 1.0 - temporal_weight - importance_weight;
+                
+                let score = 
+                    distance_weight * dist_norm +                     // Distance component
+                    temporal_weight * (1.0 - temporal) +             // Temporal component
+                    importance_weight * (1.0 - m.attributes.importance); // Importance component
+                
+                (m, score, temporal)  // Keep temporal for tiebreaking
+            })
+            .collect();
+        
+        // Sort by score (lower is better), break ties by recency
+        scored_results.sort_by(|a, b| {
+            let (_, a_score, a_temporal) = a;
+            let (_, b_score, b_temporal) = b;
+            
+            match a_score.partial_cmp(b_score) {
+                Some(std::cmp::Ordering::Equal) => b_temporal.partial_cmp(a_temporal)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                ord => ord.unwrap_or(std::cmp::Ordering::Equal)
+            }
+        });
+        
+        scored_results.truncate(k);
+        
+        Ok(scored_results.into_iter()
+            .map(|(m, score, _)| (m, score))
             .collect())
     }
 
-    /// Get summary of a context
+    pub async fn update_memory_decay(&mut self) -> Result<()> {
+        let now = SystemTime::now();
+        let mut memories = self.memories.write();
+
+        for memory in memories.values_mut() {
+            let age = now.duration_since(memory.attributes.timestamp)
+                .unwrap_or(Duration::from_secs(0))
+                .as_secs() as f32 / 3600.0; // Convert to hours
+
+            let recency = now.duration_since(memory.attributes.last_access)
+                .unwrap_or(Duration::from_secs(0))
+                .as_secs() as f32 / 3600.0;
+
+            let access_factor = 1.0 / (1.0 + memory.attributes.access_count as f32).ln();
+            let decay = self.config.base_decay_rate * age * access_factor * recency;
+            
+            memory.attributes.importance = (memory.attributes.importance * (1.0 - decay))
+                .max(self.config.min_importance)
+                .min(self.config.max_importance);
+        }
+
+        Ok(())
+    }
+
     pub async fn get_context_summary(&self, context: &str) -> Result<ContextSummary> {
-        let _monitor = PerformanceMonitor::new("get_context_summary");
-        let memories = self.memories.read().await;
-        
-        let context_memories: Vec<_> = memories
-            .values()
+        let memories = self.memories.read();
+        let context_memories: Vec<_> = memories.values()
             .filter(|m| m.attributes.context == context)
             .collect();
 
         if context_memories.is_empty() {
             return Ok(ContextSummary {
-                context: context.to_string(),
-                importance: 0.0,
                 memory_count: 0,
-                average_vector: vec![],
-                key_relationships: vec![],
+                average_importance: 0.0,
             });
         }
 
-        let memory_count = context_memories.len();
-        let importance = context_memories.iter().map(|m| m.attributes.importance).sum::<f32>() / memory_count as f32;
-
-        // Calculate average vector
-        let dim = context_memories[0].vector.data.len();
-        let mut average_vector = vec![0.0; dim];
-        for memory in &context_memories {
-            for (avg, val) in average_vector.iter_mut().zip(&memory.vector.data) {
-                *avg += val;
-            }
-        }
-        for avg in &mut average_vector {
-            *avg /= memory_count as f32;
-        }
-
-        // Get most common relationships
-        let mut relationship_counts = HashMap::new();
-        for memory in &context_memories {
-            for rel in &memory.attributes.relationships {
-                *relationship_counts.entry(rel.clone()).or_insert(0) += 1;
-            }
-        }
-
-        let mut key_relationships: Vec<_> = relationship_counts.into_iter().collect();
-        key_relationships.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-        let key_relationships = key_relationships.into_iter()
-            .take(5)
-            .map(|(rel, _)| rel)
-            .collect();
-
         Ok(ContextSummary {
-            context: context.to_string(),
-            importance,
-            memory_count,
-            average_vector,
-            key_relationships,
+            memory_count: context_memories.len(),
+            average_importance: context_memories.iter()
+                .map(|m| m.attributes.importance)
+                .sum::<f32>() / context_memories.len() as f32,
         })
     }
 
-    /// Delete all memories in a context
-    pub async fn delete_context(&mut self, context: &str) -> Result<()> {
-        let _monitor = PerformanceMonitor::new("delete_context");
-        let mut memories = self.memories.write().await;
+    pub async fn search_by_context(&self, context: &str, query: &[f32], k: usize) -> Result<Vec<(TemporalVector, f32)>> {
+        let memories = self.memories.read();
+        let now = SystemTime::now();
         
-        memories.retain(|_, memory| memory.attributes.context != context);
-        Ok(())
+        let context_memories: Vec<_> = memories.values()
+            .filter(|m| m.attributes.context == context)
+            .collect();
+        
+        let mut results: Vec<_> = context_memories.into_iter()
+            .map(|m| {
+                let distance = self.distance_metric.calculate_distance(&m.vector.data, query);
+                let time_diff = now.duration_since(m.attributes.timestamp)
+                    .unwrap_or(Duration::from_secs(0))
+                    .as_secs_f32();
+                
+                // Temporal score: more recent = higher score (closer to 1)
+                let temporal_score = (-self.config.base_decay_rate * time_diff).exp();
+                
+                // Combine scores with configurable weights
+                let similarity_weight = 0.4;
+                let temporal_weight = 0.4;
+                let importance_weight = 0.2;
+                
+                let score = (distance * similarity_weight) -
+                           (temporal_score * temporal_weight) -
+                           (m.attributes.importance * importance_weight);
+                
+                (m.clone(), score)
+            })
+            .collect();
+        
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(k);
+        
+        Ok(results)
     }
 
-    /// Get relationships for a memory
-    pub async fn get_relationships(&self, id: &str) -> Result<Vec<TemporalVector>> {
-        let _monitor = PerformanceMonitor::new("get_relationships");
-        let memories = self.memories.read().await;
-        
-        let memory = memories.get(id).ok_or_else(|| MemoryError::NotFound(id.to_string()))?;
-        
-        Ok(memory.attributes.relationships.iter()
-            .filter_map(|rel_id| memories.get(rel_id))
-            .cloned()
-            .collect())
-    }
+    pub async fn get_related_memories(&self, id: &str, max_depth: usize) -> Result<Vec<TemporalVector>> {
+        let mut visited = HashSet::new();
+        let mut result = Vec::new();
+        let mut queue = VecDeque::new();
 
-    /// Update memory decay based on time and access patterns
-    pub async fn update_memory_decay(&mut self) -> Result<()> {
-        let _monitor = PerformanceMonitor::new("update_memory_decay");
-        let mut memories = self.memories.write().await;
-        
-        let now = std::time::SystemTime::now();
-        for memory in memories.values_mut() {
-            // Calculate time-based decay
-            let age = now.duration_since(memory.attributes.timestamp)
-                .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-                .as_secs_f32();
-            
-            // Calculate access-based decay
-            let time_since_access = now.duration_since(memory.attributes.last_access)
-                .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-                .as_secs_f32();
-            
-            // Combine base decay rate with memory's individual rate
-            let effective_decay_rate = self.config.base_decay_rate * memory.attributes.decay_rate;
-            
-            // Calculate decay factors
-            let time_factor = (-effective_decay_rate * age).exp();
-            let access_factor = (memory.attributes.access_count as f32 + 1.0).ln();
-            let recency_factor = (-effective_decay_rate * time_since_access).exp();
-            
-            // Update importance
-            memory.attributes.importance *= time_factor * access_factor * recency_factor;
-            memory.attributes.importance = memory.attributes.importance.clamp(
-                self.config.min_importance,
-                self.config.max_importance,
-            );
-
-            debug!(
-                "Memory {} decay: time_factor={:.3}, access_factor={:.3}, recency_factor={:.3}, new_importance={:.3}",
-                memory.vector.id, time_factor, access_factor, recency_factor, memory.attributes.importance
-            );
+        if let Some(memory) = self.get_memory(id).await? {
+            queue.push_back((memory, 0));
+            visited.insert(id.to_string());
         }
 
-        // Remove memories below minimum importance
-        memories.retain(|_, memory| memory.attributes.importance >= self.config.min_importance);
-        Ok(())
-    }
+        while let Some((memory, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
 
-    /// Get storage statistics
-    pub async fn get_memory_stats(&self) -> Result<MemoryStats> {
-        let _monitor = PerformanceMonitor::new("get_memory_stats");
-        let memories = self.memories.read().await;
-        
-        let total_memories = memories.len();
-        let mut total_importance = 0.0;
-        let mut context_counts = HashMap::new();
-        let mut relationship_counts = HashMap::new();
-
-        for memory in memories.values() {
-            total_importance += memory.attributes.importance;
-            *context_counts.entry(memory.attributes.context.clone()).or_insert(0) += 1;
-            
-            for rel in &memory.attributes.relationships {
-                *relationship_counts.entry(rel.clone()).or_insert(0) += 1;
+            for rel_id in &memory.attributes.relationships {
+                if !visited.contains(rel_id) {
+                    if let Some(rel_memory) = self.get_memory(rel_id).await? {
+                        visited.insert(rel_id.clone());
+                        result.push(rel_memory.clone());
+                        queue.push_back((rel_memory, depth + 1));
+                    }
+                }
             }
         }
 
-        let capacity_used = (total_memories as f32 / self.config.max_memories as f32) * 100.0;
-        let average_importance = if total_memories > 0 {
-            total_importance / total_memories as f32
-        } else {
-            0.0
-        };
-
-        let mut most_connected: Vec<_> = relationship_counts.into_iter().collect();
-        most_connected.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-        let most_connected = most_connected.into_iter().take(10).collect();
-
-        Ok(MemoryStats {
-            total_memories,
-            capacity_used,
-            average_importance,
-            context_distribution: context_counts,
-            most_connected_memories: most_connected,
-        })
+        Ok(result)
     }
 
-    #[cfg(test)]
-    pub async fn get_memory_no_update(&self, id: &str) -> Result<Option<TemporalVector>> {
-        let memories = self.memories.read().await;
-        Ok(memories.get(id).cloned())
+    pub async fn consolidate_memories(&mut self) -> Result<()> {
+        let memories = self.memories.read();
+        let mut to_consolidate = Vec::new();
+
+        for (id1, m1) in memories.iter() {
+            for (id2, m2) in memories.iter() {
+                if id1 >= id2 {
+                    continue;
+                }
+
+                let similarity = 1.0 - self.distance_metric.calculate_distance(&m1.vector.data, &m2.vector.data);
+                if similarity > self.config.similarity_threshold {
+                    to_consolidate.push((id1.clone(), id2.clone()));
+                }
+            }
+        }
+        drop(memories);
+
+        for (id1, id2) in to_consolidate {
+            let mut memories = self.memories.write();
+            if let (Some(m1), Some(m2)) = (memories.get(&id1), memories.get(&id2)) {
+                let new_importance = (m1.attributes.importance + m2.attributes.importance) / 2.0;
+                let mut consolidated = m1.clone();
+                consolidated.attributes.importance = new_importance;
+                memories.insert(id1, consolidated);
+                memories.remove(&id2);
+            }
+        }
+
+        Ok(())
     }
+
+    pub async fn list_memories(&self) -> Result<Vec<TemporalVector>> {
+        let memories = self.memories.read();
+        Ok(memories.values().cloned().collect())
+    }
+
+    pub async fn get_memory_count(&self) -> usize {
+        self.memories.read().len()
+    }
+}
+
+#[derive(Debug)]
+pub struct ContextSummary {
+    pub memory_count: usize,
+    pub average_importance: f32,
 }

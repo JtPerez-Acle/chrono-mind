@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use crate::core::error::{MemoryError, Result};
 
 /// Configuration for the memory system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,26 +11,26 @@ pub struct MemoryConfig {
     /// Maximum number of memories to store
     pub max_memories: usize,
     
-    /// Maximum number of relationships per memory
-    pub max_relationships: usize,
-    
-    /// Base decay rate for memories (per hour)
-    pub base_decay_rate: f32,
-    
-    /// Time window for memory consolidation (in hours)
-    pub consolidation_window: Duration,
-    
     /// Minimum importance threshold for keeping memories
     pub min_importance: f32,
     
     /// Maximum importance value
     pub max_importance: f32,
     
-    /// Number of similar memories to consider for relationships
-    pub similar_memory_count: usize,
+    /// Base decay rate for memories (per hour)
+    pub base_decay_rate: f32,
     
     /// Similarity threshold for establishing relationships
     pub similarity_threshold: f32,
+    
+    /// Maximum number of relationships per memory
+    pub max_relationships: usize,
+    
+    /// Time window for memory consolidation (in hours)
+    pub consolidation_window: Duration,
+    
+    /// Number of similar memories to consider for relationships
+    pub similar_memory_count: usize,
     
     /// Maximum size of context window
     pub max_context_window: usize,
@@ -38,15 +39,15 @@ pub struct MemoryConfig {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            max_dimensions: 1536, // Standard for many embedding models
-            max_memories: 100_000,
-            max_relationships: 50,
-            base_decay_rate: 0.1,
-            consolidation_window: Duration::from_secs(24 * 3600), // 24 hours
-            min_importance: 0.1,
+            max_dimensions: 3,  
+            max_memories: 1000,
+            min_importance: 0.0,
             max_importance: 1.0,
-            similar_memory_count: 10,
+            base_decay_rate: 0.1,
             similarity_threshold: 0.8,
+            max_relationships: 50,
+            consolidation_window: Duration::from_secs(24 * 3600), // 24 hours
+            similar_memory_count: 10,
             max_context_window: 1000,
         }
     }
@@ -81,37 +82,67 @@ impl MemoryConfig {
     }
 
     /// Validate the configuration
-    pub fn validate(&self) -> Result<(), &'static str> {
+    pub fn validate(&self) -> Result<()> {
         if self.max_dimensions == 0 {
-            return Err("max_dimensions must be greater than 0");
+            return Err(MemoryError::ConfigError(
+                "Max dimensions must be greater than 0".to_string(),
+            ));
         }
+
         if self.max_memories == 0 {
-            return Err("max_memories must be greater than 0");
+            return Err(MemoryError::ConfigError(
+                "Max memories must be greater than 0".to_string(),
+            ));
         }
+
+        if self.min_importance < 0.0 || self.min_importance > 1.0 {
+            return Err(MemoryError::ConfigError(
+                "Min importance must be between 0 and 1".to_string(),
+            ));
+        }
+
+        if self.max_importance < self.min_importance || self.max_importance > 1.0 {
+            return Err(MemoryError::ConfigError(
+                "Max importance must be between min importance and 1".to_string(),
+            ));
+        }
+
+        if self.base_decay_rate <= 0.0 || self.base_decay_rate >= 1.0 {
+            return Err(MemoryError::ConfigError(
+                "Base decay rate must be between 0 and 1 (exclusive)".to_string(),
+            ));
+        }
+
+        if self.similarity_threshold <= 0.0 || self.similarity_threshold >= 1.0 {
+            return Err(MemoryError::ConfigError(
+                "Similarity threshold must be between 0 and 1 (exclusive)".to_string(),
+            ));
+        }
+
         if self.max_relationships == 0 {
-            return Err("max_relationships must be greater than 0");
+            return Err(MemoryError::ConfigError(
+                "Max relationships must be greater than 0".to_string(),
+            ));
         }
-        if self.base_decay_rate <= 0.0 || self.base_decay_rate > 1.0 {
-            return Err("base_decay_rate must be between 0 and 1");
-        }
+
         if self.consolidation_window.as_secs() == 0 {
-            return Err("consolidation_window must be greater than 0");
+            return Err(MemoryError::ConfigError(
+                "Consolidation window must be greater than 0".to_string(),
+            ));
         }
-        if self.min_importance < 0.0 || self.min_importance >= self.max_importance {
-            return Err("min_importance must be between 0 and max_importance");
-        }
-        if self.max_importance <= self.min_importance || self.max_importance > 1.0 {
-            return Err("max_importance must be between min_importance and 1");
-        }
+
         if self.similar_memory_count == 0 {
-            return Err("similar_memory_count must be greater than 0");
+            return Err(MemoryError::ConfigError(
+                "Similar memory count must be greater than 0".to_string(),
+            ));
         }
-        if self.similarity_threshold <= 0.0 || self.similarity_threshold > 1.0 {
-            return Err("similarity_threshold must be between 0 and 1");
-        }
+
         if self.max_context_window == 0 {
-            return Err("max_context_window must be greater than 0");
+            return Err(MemoryError::ConfigError(
+                "Max context window must be greater than 0".to_string(),
+            ));
         }
+
         Ok(())
     }
 }
