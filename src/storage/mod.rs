@@ -1,14 +1,18 @@
-use crate::error::Result;
+//! Storage implementations for vector and memory persistence
+//! 
+//! This module provides different storage backends and metrics implementations
+//! for the vector memory system.
+
+use crate::core::error::Result;
 use async_trait::async_trait;
 
 pub mod metrics;
-pub mod data_dir;
-pub mod memory;
-pub mod mmap;
+pub mod persistence;
 pub mod hnsw;
 
-pub use hnsw::Config as HnswConfig;
-pub use hnsw::HnswIndex;
+pub use metrics::DistanceMetric;
+pub use persistence::StorageBackend;
+pub use hnsw::{HNSWConfig, TemporalHNSW};
 
 /// A vector with its identifier
 #[derive(Debug, Clone, PartialEq)]

@@ -1,105 +1,72 @@
 use std::f32;
-use std::fmt::Debug;
 
-/// Trait for vector distance metrics
-pub trait DistanceMetric: Send + Sync + Debug {
-    fn distance(&self, a: &[f32], b: &[f32]) -> f32;
-    fn name(&self) -> &'static str;
+/// Trait for implementing distance/similarity metrics
+pub trait DistanceMetric: Send + Sync {
+    /// Calculate similarity between two vectors
+    fn similarity(&self, a: &[f32], b: &[f32]) -> f32;
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct EuclideanDistance;
-
-impl DistanceMetric for EuclideanDistance {
-    fn distance(&self, a: &[f32], b: &[f32]) -> f32 {
-        debug_assert_eq!(a.len(), b.len(), "Vector dimensions must match");
-        a.iter()
-            .zip(b.iter())
-            .map(|(x, y)| (x - y) * (x - y))
-            .sum::<f32>()
-            .sqrt()
-    }
-
-    fn name(&self) -> &'static str {
-        "euclidean"
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
+/// Cosine similarity implementation
+#[derive(Clone)]
 pub struct CosineDistance;
 
-impl DistanceMetric for CosineDistance {
-    fn distance(&self, a: &[f32], b: &[f32]) -> f32 {
-        debug_assert_eq!(a.len(), b.len(), "Vector dimensions must match");
-        
-        let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        
-        if norm_a == 0.0 || norm_b == 0.0 {
-            return 1.0; // Maximum distance for zero vectors
-        }
-        
-        1.0 - (dot_product / (norm_a * norm_b))
-    }
-
-    fn name(&self) -> &'static str {
-        "cosine"
+impl CosineDistance {
+    /// Create a new CosineDistance instance
+    pub fn new() -> Self {
+        Self
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct DotProductDistance;
+impl DistanceMetric for CosineDistance {
+    fn similarity(&self, a: &[f32], b: &[f32]) -> f32 {
+        if a.len() != b.len() || a.is_empty() {
+            return 0.0;
+        }
 
-impl DistanceMetric for DotProductDistance {
-    fn distance(&self, a: &[f32], b: &[f32]) -> f32 {
-        debug_assert_eq!(a.len(), b.len(), "Vector dimensions must match");
-        -(a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>())
-    }
+        let mut dot_product = 0.0;
+        let mut norm_a = 0.0;
+        let mut norm_b = 0.0;
 
-    fn name(&self) -> &'static str {
-        "dot_product"
+        for (x, y) in a.iter().zip(b.iter()) {
+            dot_product += x * y;
+            norm_a += x * x;
+            norm_b += y * y;
+        }
+
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return 0.0;
+        }
+
+        (dot_product / (norm_a.sqrt() * norm_b.sqrt())).min(1.0)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_log::test;
+    const EPSILON: f32 = 1e-6;
 
     #[test]
-    fn test_euclidean_distance() {
-        let metric = EuclideanDistance;
-        let a = vec![1.0, 0.0, 0.0];
-        let b = vec![0.0, 1.0, 0.0];
-        let distance = metric.distance(&a, &b);
-        assert!((distance - f32::sqrt(2.0)).abs() < 1e-6);
-    }
+    fn test_cosine_similarity() {
+        let metric = CosineDistance::new();
+        
+        // Test identical vectors
+        let v1 = vec![1.0, 0.0, 1.0];
+        assert!((metric.similarity(&v1, &v1) - 1.0).abs() < EPSILON);
 
-    #[test]
-    fn test_cosine_distance() {
-        let metric = CosineDistance;
-        let a = vec![1.0, 0.0];
-        let b = vec![0.0, 1.0];
-        let distance = metric.distance(&a, &b);
-        assert!((distance - 1.0).abs() < 1e-6); // Orthogonal vectors should have distance 1
-    }
+        // Test orthogonal vectors
+        let v2 = vec![0.0, 1.0, 0.0];
+        assert!((metric.similarity(&v1, &v2) - 0.0).abs() < EPSILON);
 
-    #[test]
-    fn test_dot_product_distance() {
-        let metric = DotProductDistance;
-        let a = vec![1.0, 2.0, 3.0];
-        let b = vec![4.0, 5.0, 6.0];
-        let distance = metric.distance(&a, &b);
-        assert_eq!(distance, -(32.0)); // -(1*4 + 2*5 + 3*6)
-    }
+        // Test similar vectors
+        let v3 = vec![1.0, 0.5, 1.0];
+        let sim = metric.similarity(&v1, &v3);
+        assert!(sim > 0.9 && sim < 1.0);
 
-    #[test]
-    fn test_zero_vector_cosine() {
-        let metric = CosineDistance;
-        let zero = vec![0.0, 0.0];
-        let a = vec![1.0, 0.0];
-        assert_eq!(metric.distance(&zero, &a), 1.0);
-        assert_eq!(metric.distance(&a, &zero), 1.0);
+        // Test empty vectors
+        assert!((metric.similarity(&[], &[]) - 0.0).abs() < EPSILON);
+
+        // Test different length vectors
+        assert!((metric.similarity(&[1.0], &[1.0, 2.0]) - 0.0).abs() < EPSILON);
     }
 }

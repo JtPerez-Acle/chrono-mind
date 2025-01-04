@@ -1239,6 +1239,7 @@ dependencies = [
  "bincode",
  "criterion",
  "memmap2",
+ "once_cell",
  "proptest",
  "rand",
  "serde",
