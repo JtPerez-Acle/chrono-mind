@@ -20,6 +20,9 @@ pub struct MemoryConfig {
     /// Base decay rate for memories (per hour)
     pub base_decay_rate: f32,
     
+    /// Weight for temporal scoring (0.0 to 1.0)
+    pub temporal_weight: f32,
+    
     /// Similarity threshold for establishing relationships
     pub similarity_threshold: f32,
     
@@ -39,11 +42,12 @@ pub struct MemoryConfig {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            max_dimensions: 3,  
+            max_dimensions: 768,  // BERT base dimensions
             max_memories: 1000,
             min_importance: 0.0,
             max_importance: 1.0,
             base_decay_rate: 0.1,
+            temporal_weight: 0.3,  // 30% weight for temporal scoring
             similarity_threshold: 0.8,
             max_relationships: 50,
             consolidation_window: Duration::from_secs(24 * 3600), // 24 hours
@@ -66,6 +70,7 @@ impl MemoryConfig {
         similar_memory_count: usize,
         similarity_threshold: f32,
         max_context_window: usize,
+        temporal_weight: f32,
     ) -> Self {
         Self {
             max_dimensions,
@@ -78,6 +83,7 @@ impl MemoryConfig {
             similar_memory_count,
             similarity_threshold,
             max_context_window,
+            temporal_weight,
         }
     }
 
@@ -143,6 +149,12 @@ impl MemoryConfig {
             ));
         }
 
+        if self.temporal_weight < 0.0 || self.temporal_weight > 1.0 {
+            return Err(MemoryError::ConfigError(
+                "Temporal weight must be between 0 and 1".to_string(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -170,6 +182,7 @@ mod tests {
             5,
             0.7,
             500,
+            0.4,
         );
         assert!(config.validate().is_ok());
     }
@@ -191,6 +204,10 @@ mod tests {
         
         config = MemoryConfig::default();
         config.similarity_threshold = 0.0;
+        assert!(config.validate().is_err());
+        
+        config = MemoryConfig::default();
+        config.temporal_weight = 1.5;
         assert!(config.validate().is_err());
     }
 }

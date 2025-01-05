@@ -112,8 +112,21 @@ impl TemporalHNSW {
         }
     }
 
+    /// Normalize a vector to unit length
+    fn normalize_vector(&self, v: &[f32]) -> Vec<f32> {
+        let magnitude = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if magnitude > 0.0 {
+            v.iter().map(|x| x / magnitude).collect()
+        } else {
+            v.to_vec()
+        }
+    }
+
     pub async fn insert(&self, temporal: &TemporalVector) -> Result<()> {
         self.validate_dimensions(&temporal.vector.data)?;
+
+        // Normalize vector before insertion
+        let normalized_vector = self.normalize_vector(&temporal.vector.data);
 
         let mut nodes = self.nodes.write().await;
         let mut entry_points = self.entry_points.write().await;
@@ -128,7 +141,7 @@ impl TemporalHNSW {
 
         let mut new_node = Node::new(
             temporal.vector.id.clone(),
-            temporal.vector.data.clone(),
+            normalized_vector.clone(),  
             max_layer,
             temporal_score,
         );
@@ -145,7 +158,7 @@ impl TemporalHNSW {
             let candidates = if let Some(ref ep) = curr_ep {
                 self.search_layer(
                     &*nodes,
-                    &temporal.vector.data,
+                    &normalized_vector,  
                     Some(ep),
                     1,
                     layer,
@@ -201,6 +214,9 @@ impl TemporalHNSW {
     pub async fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
         self.validate_dimensions(query)?;
 
+        // Normalize query vector before search
+        let normalized_query = self.normalize_vector(query);
+
         let nodes = self.nodes.read().await;
         let entry_points = self.entry_points.read().await;
 
@@ -211,7 +227,7 @@ impl TemporalHNSW {
         let candidates = if let Some(ep) = entry_points.last() {
             self.search_layer(
                 &*nodes,
-                query,
+                &normalized_query,  
                 Some(ep),
                 self.config.ef_search,
                 0,

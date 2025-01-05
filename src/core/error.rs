@@ -15,7 +15,7 @@ pub enum MemoryError {
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
     
-    #[error("Invalid vector dimensions: got {got}, expected {expected}")]
+    #[error("Invalid dimensions: got {got}, expected {expected}")]
     InvalidDimensions {
         got: usize,
         expected: usize,
@@ -41,6 +41,9 @@ pub enum MemoryError {
 
     #[error("Task error: {0}")]
     TaskError(String),
+
+    #[error("HNSW error: {0}")]
+    HnswError(String),
 
     #[error("Other error: {0}")]
     Other(String),

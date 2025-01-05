@@ -1,274 +1,133 @@
-# ChronoMind Benchmarks
+🔬 Vector Store Benchmark Suite
+============================
 
-This document presents comprehensive benchmarks for the ChronoMind implementation, focusing on performance characteristics across different operations and scales.
-
-## Performance Hypotheses
-
-### 1. Batch Insertion Performance
-| Metric | Excellent | Good | Baseline |
-|--------|-----------|------|----------|
-| Single vector | < 250ns | < 500ns | < 1µs |
-| 100 vectors | < 25µs | < 50µs | < 100µs |
-| Throughput | > 4M vectors/s | > 2M vectors/s | > 1M vectors/s |
-
-**Rationale:**
-- Memory allocation and index updates are our primary bottlenecks
-- Rust's zero-cost abstractions provide near-optimal performance
-- HNSW construction complexity is O(log N) per insertion
-- Baseline numbers derived from actual benchmarks
-
-### 2. Search Performance
-| Metric | Excellent | Good | Baseline |
-|--------|-----------|------|----------|
-| Memory Search | < 200ns | < 500ns | < 1µs |
-| HNSW Search | < 15µs | < 30µs | < 50µs |
-| Context Search | < 20µs | < 40µs | < 80µs |
-
-**Rationale:**
-- Search complexity is O(log N) in HNSW
-- Memory operations benefit from cache locality
-- Context search includes additional semantic processing
-- Baseline derived from actual measurements
-
-### 3. Memory Usage
-| Metric | Excellent | Good | Baseline |
-|--------|-----------|------|----------|
-| Base Memory | < 1MB | < 2MB | < 5MB |
-| Per Vector | < 1KB | < 2KB | < 5KB |
-| Index Overhead | < 20% | < 40% | < 60% |
-
-**Rationale:**
-- Memory efficiency from Rust's ownership model
-- Cache-friendly data structures maintain performance
-- Minimal overhead from index structures
-- Baseline numbers from actual implementation
-
-## Methodology
-
-### Hardware Configuration
-```
-CPU: AMD Ryzen 9 5950X (16 cores, 32 threads)
-RAM: 64GB DDR4-3600
-Storage: NVMe SSD
-OS: Ubuntu 22.04 LTS
-```
-
-### Vector Configuration
-- Dimensions: 3 (test vectors)
-- Data Type: f32 (32-bit floating point)
-- Distribution: Fixed test vectors [0.1, 0.2, 0.3]
-- Test Set Size: 100 vectors
-
-### Runtime Parameters
-- HNSW M (max connections): 16
-- HNSW ef_construction: 100
-- Batch Size: Variable (100, 1000, 10000)
-- Warm-up Time: 2 seconds
-- Measurement Time: 10 seconds
-- Sample Size: 100
-
-### Measurement Criteria
-1. **Latency**
-   - p50, p95, p99 percentiles
-   - Response time distribution
-
-2. **Throughput**
-   - Operations per second
-   - System resource utilization
-
-3. **Memory Usage**
-   - Resident Set Size (RSS)
-   - Virtual Memory Size
-   - Memory growth patterns
-
-4. **Scalability**
-   - Linear scaling factor
-   - Resource consumption ratio
-
-## OUTPUTS TO DATE (2025-01-04)
-
-### Latest Benchmark Results
-
-#### 1. Vector Operations (10K dataset)
-| Operation | Latency | Change | Notes |
-|-----------|---------|--------|--------|
-| Insert | 2.35 µs | +851.80% | Performance regression, needs investigation |
-| Search | 103.37 ns | -45.60% | Performance improvement |
-
-#### 2. HNSW Operations (10K dataset)
-| Operation | Latency | Change | Notes |
-|-----------|---------|--------|--------|
-| Insert | 2.29 µs | -87.05% | Significant performance improvement |
-| Search | 82.02 ns | -99.31% | Major performance improvement |
-
-#### 3. Temporal Operations (10K dataset)
-| Operation | Latency | Change | Notes |
-|-----------|---------|--------|--------|
-| Get Related | 209.46 ns | +4.54% | Minor regression |
-| Context Search | 15.69 µs | +6.39% | Minor regression |
-
-### Analysis
-
-1. **Performance Highlights**
-   - All core operations are performing within excellent parameters
-   - Sub-microsecond latency for basic memory operations
-   - Search operations show consistent sub-15µs response times
-   - HNSW operations maintain logarithmic complexity as expected
-
-2. **Improvements**
-   - Temporal operations show consistent improvement
-   - HNSW search performance significantly enhanced
-   - Low outlier counts indicate stable implementation
-
-3. **Areas for Investigation**
-   - Minor regression in HNSW insert performance
-   - Context search latency gap between memory and temporal operations
-
-4. **Recommendations**
-   - Profile HNSW insert operation to identify regression cause
-   - Consider optimizing context search in temporal operations
-   - Maintain current optimization path for search operations
-
-## Performance Analysis
-
-### Improvements
-1. **Search Performance**:
-   - HNSW search latency reduced by 99.31%
-   - Vector search latency reduced by 45.60%
-   - Both well within target latency of 1ms
-
-2. **HNSW Operations**:
-   - Insert performance improved by 87.05%
-   - Search performance shows exceptional improvement
-   - Normalized vectors contributing to consistent results
-
-### Regressions
-1. **Memory Operations**:
-   - Insert latency increased by 851.80%
-   - Likely due to increased vector dimensions (768 vs 3)
-   - Investigation needed for optimization
-
-2. **Temporal Features**:
-   - Minor regressions in temporal operations (4-6%)
-   - Still within acceptable performance bounds
-   - Room for optimization in temporal calculations
-
-## Recommendations
-
-1. **High Priority**:
-   - Investigate memory insert performance regression
-   - Profile temporal operations for optimization
-   - Consider batch operations for large inserts
-
-2. **Medium Priority**:
-   - Implement vector compression for large dimensions
-   - Add caching for frequent temporal queries
-   - Optimize context-based routing
-
-3. **Low Priority**:
-   - Add distributed index support
-   - Implement GPU acceleration
-   - Add more comprehensive benchmarks
-
-## 🚀 Performance Benchmarks
-
-## Overview
-This document outlines the performance characteristics of our temporal ChronoMind, demonstrating its exceptional speed and efficiency in real-world scenarios.
-
-## Latest Results (2025-01-04)
-
-### 1. Core Operations Performance
-
-#### Memory Operations
-| Operation | Latency | Change | Notes |
-|-----------|---------|--------|--------|
-| Insert | 2.21 µs | -6.30% ⬇️ | Consistent improvement |
-| Search | 103.25 ns | ~0% ↔️ | Stable, sub-microsecond search |
-
-#### HNSW Operations
-| Operation | Latency | Change | Notes |
-|-----------|---------|--------|--------|
-| Insert | 2.22 µs | -3.01% ⬇️ | Steady improvement |
-| Search | 84.93 ns | +2.94% ⬆️ | Minor regression, still sub-100ns |
-
-#### Temporal Operations
-| Operation | Latency | Change | Notes |
-|-----------|---------|--------|--------|
-| Get Related | 201.37 ns | -3.27% ⬇️ | Sub-microsecond temporal lookup |
-| Context Search | 15.26 µs | -3.33% ⬇️ | Improved context awareness |
-
-### 2. Performance Highlights
-
-#### 🏃‍♂️ Speed
-- **Ultra-fast Search**: Consistent sub-100ns search times
-- **Quick Inserts**: All insert operations under 2.5µs
-- **Efficient Temporal**: Related memory lookups in ~200ns
-
-#### 📈 Improvements
-- Memory insert latency reduced by 6.30%
-- HNSW insert performance improved by 3.01%
-- Temporal operations showing consistent improvements
-
-#### 🎯 Stability
-- Search performance remains stable with minimal variance
-- Low outlier rates across all operations
-- Consistent sub-microsecond core operations
-
-### 3. Real-world Performance
-
-#### Vector Search (10K vectors, 768 dims)
-```mermaid
-xychart-beta
-    title "Operation Latency Distribution"
-    x-axis ["Insert", "Search", "Temporal", "Context"]
-    y-axis "Time (µs)" 0 --> 16
-    bar [2.21, 0.10, 0.20, 15.26]
-```
-
-#### Throughput Capabilities
-- Search: ~10M QPS (84.93ns per query)
-- Insert: ~450K ops/s (2.22µs per insert)
-- Temporal: ~5M ops/s (201.37ns per lookup)
-
-### 4. System Requirements
-- CPU: Modern multi-core processor
-- RAM: 16GB+ recommended
-- Storage: SSD preferred for optimal performance
-- OS: Linux/Unix-based systems
-
-### 5. Configuration Guidelines
-
-#### Optimal Settings
-```rust
-HNSWConfig {
-    ef_construction: 200,  // Balance between build time and accuracy
-    max_connections: 64,   // Optimal for 768-dim vectors
-    ef_search: 100,       // Provides 0.95+ recall
-}
-```
-
-#### Memory Usage
-- Base: ~30MB for 10K vectors
-- Per Vector: ~3KB (768 dims + metadata)
-- Index Overhead: ~20%
-
-### 6. Future Optimizations
-
-#### High Priority
-1. Optimize HNSW search to reverse minor regression
-2. Implement batch operations for bulk inserts
-3. Add vector compression for large dimensions
-
-#### Medium Priority
-1. Enhance temporal decay calculations
-2. Implement GPU acceleration for large datasets
-3. Add distributed index support
-
-## Conclusion
-Our temporal ChronoMind demonstrates exceptional performance characteristics:
-- Sub-100ns vector search
-- Sub-microsecond insert operations
-- Efficient temporal operations
-- Stable and consistent performance
-
-These results position our system as a high-performance solution for real-time vector search applications with temporal awareness.
+╔═══════════════════════════════════════════════════════════════╗
+║ 🚀 Memory Operations                                           ║
+╚═══════════════════════════════════════════════════════════════╝
+⠁ [00:00:00] [---------------------------------------------------------------------------------------------------] 0/100 (0s)Benchmarking memory_ops_bert-base/search_small_chat_histo
+memory_ops_bert-base/search_small_chat_history_ExactMatch
+                        time:   [68.645 µs 69.806 µs 70.307 µs]
+                        change: [+7.8845% +9.6156% +11.368%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+memory_ops_bert-base/search_small_chat_history_Semantic
+                        time:   [1.1702 ms 1.1957 ms 1.2454 ms]
+                        change: [+0.7468% +4.5684% +8.7786%] (p = 0.04 < 0.05)
+                        Change within noise threshold.
+Found 3 outliers among 10 measurements (30.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+memory_ops_bert-base/search_small_chat_history_Hybrid
+                        time:   [516.47 µs 520.86 µs 525.03 µs]
+                        change: [-14.224% -11.773% -9.3776%] (p = 0.00 < 0.05)
+                        Performance has improved.
+memory_ops_bert-base/search_small_knowledge_base_ExactMatch
+                        time:   [59.363 µs 59.556 µs 59.768 µs]
+                        change: [-23.166% -22.698% -22.153%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+memory_ops_bert-base/search_small_knowledge_base_Semantic
+                        time:   [757.52 µs 760.48 µs 764.10 µs]
+                        change: [-14.150% -12.862% -11.573%] (p = 0.00 < 0.05)
+                        Performance has improved.
+memory_ops_bert-base/search_small_knowledge_base_Hybrid
+                        time:   [395.36 µs 397.51 µs 400.34 µs]
+                        change: [-18.585% -17.169% -15.659%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+memory_ops_bert-base/search_small_mixed_ExactMatch
+                        time:   [104.87 µs 105.10 µs 105.39 µs]
+                        change: [+44.064% +45.559% +47.142%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+memory_ops_bert-base/search_small_mixed_Semantic
+                        time:   [784.98 µs 798.54 µs 811.86 µs]
+                        change: [-13.963% -9.2307% -4.4250%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+memory_ops_bert-base/search_small_mixed_Hybrid
+                        time:   [436.04 µs 437.48 µs 440.12 µs]
+                        change: [-1.2644% +1.5354% +4.6873%] (p = 0.34 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+ setting number of points 50000 
+ setting number of points 100000 
+memory_ops_bert-base/search_medium_chat_history_ExactMatch
+                        time:   [278.78 µs 279.19 µs 279.64 µs]
+                        change: [-32.832% -32.130% -31.547%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+memory_ops_bert-base/search_medium_chat_history_Semantic
+                        time:   [3.4916 ms 3.5033 ms 3.5226 ms]
+                        change: [-7.2538% -5.4991% -3.9252%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 10 measurements (30.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+memory_ops_bert-base/search_medium_chat_history_Hybrid
+                        time:   [1.7735 ms 1.7880 ms 1.8003 ms]
+                        change: [-8.7938% -6.3942% -4.2965%] (p = 0.00 < 0.05)
+                        Performance has improved.
+ setting number of points 150000 
+ setting number of points 200000 
+memory_ops_bert-base/search_medium_knowledge_base_ExactMatch
+                        time:   [443.08 µs 443.78 µs 444.68 µs]
+                        change: [+7.9230% +9.8638% +11.647%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+memory_ops_bert-base/search_medium_knowledge_base_Semantic
+                        time:   [5.2470 ms 5.2815 ms 5.3106 ms]
+                        change: [-2.7520% -0.9817% +0.9746%] (p = 0.33 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+memory_ops_bert-base/search_medium_knowledge_base_Hybrid
+                        time:   [2.6749 ms 2.7006 ms 2.7285 ms]
+                        change: [-3.8456% -1.4718% +0.5244%] (p = 0.26 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high mild
+ setting number of points 250000 
+ setting number of points 300000 
+memory_ops_bert-base/search_medium_mixed_ExactMatch
+                        time:   [658.50 µs 660.14 µs 662.76 µs]
+                        change: [-14.386% -11.716% -8.7525%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+memory_ops_bert-base/search_medium_mixed_Semantic
+                        time:   [5.6537 ms 5.6947 ms 5.7401 ms]
+                        change: [-4.3611% -2.0285% +0.1951%] (p = 0.12 > 0.05)
+                        No change in performance detected.
+memory_ops_bert-base/search_medium_mixed_Hybrid
+                        time:   [2.8144 ms 2.8522 ms 2.8823 ms]
+                        change: [-5.6997% -4.2669% -2.8747%] (p = 0.00 < 0.05)
+                        Performance has improved.
+ setting number of points 350000 
+ setting number of points 400000 
+ setting number of points 450000 
+ setting number of points 500000 
+ setting number of points 550000 
+ setting number of points 600000 
+ setting number of points 650000 
+ setting number of points 700000 
+ setting number of points 750000 
+ setting number of points 800000 
+ setting number of points 850000 
+ setting number of points 900000 
+ setting number of points 950000 
+ setting number of points 1000000 
+ setting number of points 1050000 
+ setting number of points 1100000
+ setting number of points 1150000 
+ setting number of points 1200000
+ setting number of points 1250000

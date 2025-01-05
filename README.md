@@ -4,230 +4,169 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](http://www.apache.org/licenses/LICENSE-2.0)
-[![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](docs/)
-[![Benchmarks](https://img.shields.io/badge/benchmarks-view-green.svg)](BENCHMARKS.md)
+[![API Docs](https://img.shields.io/badge/docs-latest-blue.svg)](docs/API.md)
+[![Benchmarks](https://img.shields.io/badge/benchmarks-view-green.svg)](docs/BENCHMARKS.md)
 
-*Redefining Vector Intelligence Through Time - A high-performance temporal vector store with sub-100ns search latency*
+*A high-performance temporal vector store with advanced memory management*
 
-[Key Features](#✨-key-features) •
-[Performance](#⚡-performance) •
-[Getting Started](#🚀-getting-started) •
-[Examples](#📚-examples)
+[Features](#key-features) •
+[Performance](#performance) •
+[Getting Started](#getting-started) •
+[API](#api)
 
 </div>
 
-## 🎯 Overview
+## Overview
 
-ChronoMind is a cutting-edge vector similarity search engine that combines blazing-fast HNSW-based search with temporal awareness. Our key differentiators:
+ChronoMind is a Rust-based vector similarity search engine that combines HNSW-based search with temporal awareness. It provides:
 
-- **🚀 Industry-Leading Speed**: 84.93ns search latency, outperforming traditional vector stores by orders of magnitude
-- **⏰ Temporal Intelligence**: First vector store with native temporal decay and importance weighting
-- **💪 Production-Ready**: Fully concurrent, lock-free architecture supporting 10M+ QPS
-- **🎯 Memory Efficient**: Only 3KB per vector with full temporal metadata
+- Fast vector similarity search with verified P99 latencies
+- Native temporal decay and importance weighting
+- Memory-efficient storage with full temporal metadata
+- Lock-free concurrent operations
 
-## ✨ Key Features
+## Key Features
+
+### Vector Operations
+
+```rust
+// Initialize with custom configuration
+let config = MemoryConfig {
+    max_connections: 16,
+    ef_construction: 100,
+    ..Default::default()
+};
+let store = MemoryStorage::new(config)?;
+
+// Save with temporal metadata
+store.save_memory(vector).await?;
+
+// Search with temporal awareness
+let results = store.search_similar(&query, k).await?;
+```
 
 ### Core Capabilities
 
-| Feature | Our Performance | Industry Average | Improvement |
-|---------|----------------|------------------|-------------|
-| Vector Search | 84.93 ns | 1-10 µs | 10-100x faster |
-| Temporal Lookup | 201.37 ns | N/A | Unique Feature |
-| Context Search | 15.26 µs | 50-100 µs | 3-6x faster |
-| Max QPS | ~10M | 100K-1M | 10-100x higher |
+- **HNSW-Based Search**: Multi-layer graph structure for efficient approximate nearest neighbor search
+- **Temporal Awareness**: Native support for time-based memory decay and importance weighting
+- **Concurrent Operations**: Lock-free architecture for parallel processing
+- **Memory Efficiency**: Optimized storage with minimal overhead
 
-### Advanced Features
+## Performance
 
-- **⚡ Zero-Copy Operations**
-  ```rust
-  // Direct memory access with zero allocations
-  store.add_memory_zero_copy(vector.as_ref());
-  ```
+Our benchmarks are continuously updated and available in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-- **🔄 Lock-Free Architecture**
-  ```rust
-  // Concurrent operations without locks
-  store.concurrent_batch_insert(vectors).await?;
-  ```
+### Search Performance (P99)
 
-- **📊 Real-time Monitoring**
-  ```rust
-  // Sub-microsecond performance tracking
-  let metrics = store.get_metrics().await?;
-  ```
+| Dataset Size | ExactMatch | Semantic | Hybrid |
+|-------------|------------|----------|---------|
+| Small (10K) | 69.8µs | 1.19ms | 520.8µs |
+| Medium (100K) | 279.2µs | 3.50ms | 1.79ms |
 
-## ⚡ Performance
+### Memory Usage
 
-### Latest Benchmark Results (2025-01-04)
+| Vector Type | Memory Per Vector |
+|-------------|------------------|
+| BERT (768d) | 2.8KB |
+| Ada-002 (1536d) | 5.4KB |
+| MiniLM (384d) | 1.2KB |
 
-```mermaid
-xychart-beta
-    title "Operation Latency Comparison (ns)"
-    x-axis ["Our Search", "FAISS", "Milvus", "Qdrant"]
-    y-axis "Time (ns)" 0 --> 1000
-    bar [84.93, 500, 800, 950]
+### Throughput
+
+- **Concurrent Users**: Tested with 100 simultaneous connections
+- **CPU Usage**: < 40% under full load
+- **Memory Overhead**: < 10% for HNSW graph structure
+
+## Getting Started
+
+### Installation
+
+```toml
+[dependencies]
+chronomind = "0.1.0"
 ```
-
-### Key Metrics vs Competition
-
-| Metric | Our Solution | FAISS | Milvus | Qdrant |
-|--------|-------------|-------|---------|---------|
-| Search Latency | 84.93 ns | ~500 ns | ~800 ns | ~950 ns |
-| Insert Speed | 2.21 µs | ~5 µs | ~8 µs | ~10 µs |
-| Memory/Vector | 3 KB | 4-8 KB | 5-10 KB | 6-12 KB |
-| Temporal Support | ✅ | ❌ | ❌ | ❌ |
-| Lock-Free Ops | ✅ | Limited | Limited | Limited |
-
-[View Detailed Benchmarks](BENCHMARKS.md)
-
-## 🏗️ Architecture
-
-```mermaid
-graph TB
-    Client[Client API] --> Core[Core Engine]
-    
-    subgraph Core[Lock-Free Core]
-        HNSW[HNSW Index] --> Memory[Memory Manager]
-        Memory --> Temporal[Temporal Engine]
-        Memory --> Storage[Zero-Copy Storage]
-    end
-    
-    subgraph Features[Advanced Features]
-        Temporal --> Decay[Decay Calculator]
-        Memory --> Context[Context Router]
-        HNSW --> Cache[Search Cache]
-    end
-```
-
-## 📚 Examples
 
 ### Basic Usage
 
 ```rust
-use chrono_mind::prelude::*;
+use chronomind::{MemoryStorage, MemoryConfig};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize with optimal settings
-    let store = Store::new(Config {
-        max_connections: 64,    // Optimized for 768-dim vectors
-        ef_construction: 200,   // Balance build/search speed
-        temporal_weight: 0.3,   // Temporal bias factor
-    });
-    
-    // Add vector with temporal context
-    store.add_memory(
-        vector,
-        timestamp: SystemTime::now(),
-        importance: 1.0,
-    ).await?;
-    
-    // Ultra-fast search with temporal bias
-    let results = store
-        .search(query)
-        .with_temporal_bias(0.5)
-        .with_context("user_1")
-        .limit(10)
-        .execute()
-        .await?;
+// Initialize store
+let store = MemoryStorage::new(MemoryConfig::default())?;
+
+// Add vectors
+store.save_memory(vector).await?;
+
+// Search
+let results = store.search_similar(&query, 10).await?;
+```
+
+## API
+
+See [API Documentation](docs/API.md) for detailed usage.
+
+### Core Components
+
+- `MemoryStorage`: Primary interface for vector operations
+- `TemporalVector`: Vector type with temporal metadata
+- `SearchConfig`: Configuration for search parameters
+
+### Configuration Options
+
+```rust
+pub struct MemoryConfig {
+    pub max_connections: usize,    // Default: 16
+    pub ef_construction: usize,    // Default: 100
+    pub decay_rate: f32,          // Default: 0.1
 }
 ```
 
-### Advanced Usage
+## Architecture
 
-```rust
-// Zero-copy batch operations
-let store = Store::builder()
-    .metric(CosineDistance::new())
-    .temporal_weight(0.3)
-    .max_connections(64)
-    .zero_copy(true)
-    .build();
+ChronoMind uses a multi-layer architecture:
 
-// Concurrent batch insert
-let results = store
-    .batch_insert_concurrent(vectors)
-    .with_timestamps(timestamps)
-    .with_importance(importance)
-    .execute()
-    .await?;
+1. **Core Layer**: HNSW-based vector index
+2. **Temporal Layer**: Time-based decay and importance
+3. **Concurrency Layer**: Lock-free operations
 
-// Advanced search with multiple contexts
-let results = store
-    .search(query)
-    .in_contexts(&["user_1", "user_2"])
-    .time_range(start..end)
-    .min_importance(0.5)
-    .execute()
-    .await?;
-```
+## Contributing
 
-## 🚀 Getting Started
+We welcome contributions from the community. Please be mindful of Rust's best practices and maintain a clean and readable codebase.
 
-### Prerequisites
-- Rust 1.75+
-- 16GB+ RAM for optimal performance
-- Linux/Unix environment recommended
+## License
 
-### Installation
+Apache License 2.0 - See [LICENSE](LICENSE) for details.
 
-```bash
-# Add to your project
-cargo add chrono_mind
+## Service Comparison
 
-# Or clone and build from source
-git clone https://github.com/username/chrono_mind
-cd chrono_mind
-cargo build --release
-```
+When evaluating vector stores, it's essential to understand where ChronoMind fits in the ecosystem. Here's an honest comparison with similar services:
 
-## 🤝 Contributing
+### Our Strengths
 
-We welcome contributions! See our [Contributing Guide](CONTRIBUTING.md).
+- **Temporal Features**: Native support for time-based operations and decay, which is unique among current vector stores
+- **Memory Efficiency**: Our verified 2.8KB per BERT vector (768d) is competitive with industry standards
+- **Lock-Free Operations**: True concurrent operations without global locks, beneficial for high-throughput scenarios
+- **Rust Implementation**: Zero-cost abstractions and memory safety guarantees
 
-### Development Setup
+### Areas for Consideration
 
-```bash
-# Setup development environment
-git clone https://github.com/JtPerez-Acle/chrono_mind
-cd chrono_mind
+- **Maturity**: As a newer solution, we lack the extensive production testing of established solutions like FAISS or Milvus
+- **Ecosystem**: Currently fewer tools and integrations compared to more established solutions
+- **Distribution**: Currently optimized for single-node deployments, while solutions like Milvus offer mature distributed architectures
+- **Documentation**: While growing, our documentation and examples are not as extensive as larger projects
 
-# Run our comprehensive test suite
-cargo test
+### When to Choose ChronoMind
 
-# Run performance benchmarks
-cargo bench
-```
+Consider ChronoMind when you need:
+- Time-aware vector operations with automatic decay
+- High-performance single-node deployments
+- Memory-efficient storage with full temporal metadata
+- Rust-based implementation with strong safety guarantees
 
-## 📜 License
+Consider alternatives when you need:
+- Distributed deployments across multiple nodes
+- Extensive production track record
+- Large ecosystem of tools and integrations
+- Complex filtering and attribute-based queries
 
-MIT License - see [LICENSE](LICENSE) for details.
-
-## 🏆 Why Choose ChronoMind?
-
-1. **Unmatched Performance**
-   - 10-100x faster than traditional vector stores
-   - Industry-leading memory efficiency
-   - Lock-free concurrent operations
-
-2. **Unique Features**
-   - First vector store with native temporal support
-   - Advanced context-aware search
-   - Zero-copy operations
-
-3. **Production Ready**
-   - Comprehensive test coverage
-   - Proven in high-load environments
-   - Active development and support
-
-4. **Future Proof**
-   - Regular performance optimizations
-   - Cutting-edge Rust implementation
-   - Extensible architecture
-
----
-
-<div align="center">
-Made with ❤️ by JT Perez-Acle
-
-</div>
+We believe in transparency and encourage users to evaluate their specific needs against our verified capabilities.

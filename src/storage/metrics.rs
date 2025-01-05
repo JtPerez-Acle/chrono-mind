@@ -21,6 +21,16 @@ impl CosineDistance {
         Self
     }
 
+    /// Normalize a vector to unit length
+    fn normalize_vector(v: &[f32]) -> Vec<f32> {
+        let magnitude = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if magnitude > 1e-10 {  // Use small epsilon instead of 0.0
+            v.iter().map(|x| x / magnitude).collect()
+        } else {
+            vec![0.0; v.len()]  // Return zero vector for zero magnitude
+        }
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
     unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
@@ -33,13 +43,15 @@ impl CosineDistance {
             sum = _mm256_fmadd_ps(va, vb, sum);
         }
 
+        // Horizontal sum of the 256-bit vector
+        let sum128 = _mm_add_ps(
+            _mm256_castps256_ps128(sum),
+            _mm256_extractf128_ps(sum, 1)
+        );
+        let sum64 = _mm_add_ps(sum128, _mm_movehl_ps(sum128, sum128));
+        let sum32 = _mm_add_ss(sum64, _mm_shuffle_ps(sum64, sum64, 1));
         let mut result = 0.0;
-        let mut temp = [0.0f32; 8];
-        _mm256_storeu_ps(temp.as_mut_ptr(), sum);
-        
-        for i in 0..8 {
-            result += temp[i];
-        }
+        _mm_store_ss(&mut result, sum32);
 
         // Handle remaining elements
         for i in n..a.len() {
@@ -48,74 +60,46 @@ impl CosineDistance {
 
         result
     }
-
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2")]
-    unsafe fn vector_magnitude_avx2(v: &[f32]) -> f32 {
-        let mut sum = _mm256_setzero_ps();
-        let n = v.len() / 8 * 8;
-
-        for i in (0..n).step_by(8) {
-            let va = _mm256_loadu_ps(&v[i]);
-            sum = _mm256_fmadd_ps(va, va, sum);
-        }
-
-        let mut result = 0.0;
-        let mut temp = [0.0f32; 8];
-        _mm256_storeu_ps(temp.as_mut_ptr(), sum);
-        
-        for i in 0..8 {
-            result += temp[i];
-        }
-
-        // Handle remaining elements
-        for i in n..v.len() {
-            result += v[i] * v[i];
-        }
-
-        result.sqrt()
-    }
 }
 
 impl DistanceMetric for CosineDistance {
     fn calculate_distance(&self, a: &[f32], b: &[f32]) -> f32 {
-        if a.len() != b.len() || a.is_empty() {
+        // Handle edge cases
+        if a.is_empty() || b.is_empty() || a.len() != b.len() {
             return 1.0;
         }
+
+        // Check if either vector is zero
+        let a_zero = a.iter().all(|&x| x.abs() < 1e-10);
+        let b_zero = b.iter().all(|&x| x.abs() < 1e-10);
+        if a_zero || b_zero {
+            return 1.0;
+        }
+
+        let a_normalized = Self::normalize_vector(a);
+        let b_normalized = Self::normalize_vector(b);
 
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
                 unsafe {
-                    let dot_product = Self::dot_product_avx2(a, b);
-                    let norm_a = Self::vector_magnitude_avx2(a);
-                    let norm_b = Self::vector_magnitude_avx2(b);
-
-                    if norm_a == 0.0 || norm_b == 0.0 {
-                        return 1.0;
-                    }
-
-                    return 1.0 - (dot_product / (norm_a * norm_b));
+                    let dot_product = Self::dot_product_avx2(&a_normalized, &b_normalized);
+                    // Ensure dot product is in [-1, 1] and handle numerical instability
+                    let dot_product = dot_product.max(-1.0).min(1.0);
+                    return (1.0 - dot_product).max(0.0);
                 }
             }
         }
 
         // Fallback for non-x86_64 architectures or when AVX2 is not available
         let mut dot_product = 0.0;
-        let mut norm_a = 0.0;
-        let mut norm_b = 0.0;
-
-        for (x, y) in a.iter().zip(b.iter()) {
+        for (x, y) in a_normalized.iter().zip(b_normalized.iter()) {
             dot_product += x * y;
-            norm_a += x * x;
-            norm_b += y * y;
         }
-
-        if norm_a == 0.0 || norm_b == 0.0 {
-            return 1.0;
-        }
-
-        1.0 - (dot_product / (norm_a.sqrt() * norm_b.sqrt()))
+        
+        // Ensure dot product is in [-1, 1] and handle numerical instability
+        let dot_product = dot_product.max(-1.0).min(1.0);
+        (1.0 - dot_product).max(0.0)
     }
 
     fn similarity(&self, a: &[f32], b: &[f32]) -> f32 {
@@ -123,39 +107,32 @@ impl DistanceMetric for CosineDistance {
             return 0.0;
         }
 
+        // Check if either vector is zero
+        let a_zero = a.iter().all(|&x| x.abs() < 1e-10);
+        let b_zero = b.iter().all(|&x| x.abs() < 1e-10);
+        if a_zero || b_zero {
+            return 0.0;
+        }
+
+        let a_normalized = Self::normalize_vector(a);
+        let b_normalized = Self::normalize_vector(b);
+
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
                 unsafe {
-                    let dot_product = Self::dot_product_avx2(a, b);
-                    let norm_a = Self::vector_magnitude_avx2(a);
-                    let norm_b = Self::vector_magnitude_avx2(b);
-
-                    if norm_a == 0.0 || norm_b == 0.0 {
-                        return 0.0;
-                    }
-
-                    return (dot_product / (norm_a * norm_b)).min(1.0);
+                    let dot_product = Self::dot_product_avx2(&a_normalized, &b_normalized);
+                    return dot_product.max(-1.0).min(1.0);
                 }
             }
         }
 
         // Fallback for non-x86_64 architectures or when AVX2 is not available
         let mut dot_product = 0.0;
-        let mut norm_a = 0.0;
-        let mut norm_b = 0.0;
-
-        for (x, y) in a.iter().zip(b.iter()) {
+        for (x, y) in a_normalized.iter().zip(b_normalized.iter()) {
             dot_product += x * y;
-            norm_a += x * x;
-            norm_b += y * y;
         }
-
-        if norm_a == 0.0 || norm_b == 0.0 {
-            return 0.0;
-        }
-
-        (dot_product / (norm_a.sqrt() * norm_b.sqrt())).min(1.0)
+        dot_product.max(-1.0).min(1.0)
     }
 
     fn name(&self) -> &'static str {

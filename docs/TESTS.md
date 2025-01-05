@@ -7,86 +7,89 @@ This document outlines our comprehensive test suite that ensures the reliability
 ### 1. Core Engine Tests
 Located in `src/core/tests/`
 
+#### Vector Operations
+- `test_cosine_distance`: Validates distance calculations
+  - Verifies proper normalization and scaling
+  - Tests edge cases (zero vectors, empty vectors)
+  - Ensures non-negative distances
+  - Validates 768-dimensional BERT embeddings
+
+- `test_vector_dimensions`: Tests dimension handling
+  - Validates 768-dimensional vectors (BERT standard)
+  - Ensures dimension consistency
+  - Tests invalid dimension handling
+
 #### HNSW Implementation
-- `test_hnsw_search`: Validates our 84.93ns search latency
-  - Verifies consistent sub-100ns performance
-  - Tests with varying vector dimensions (128-1024)
-  - Ensures accuracy remains above 95%
+- `test_basic_insert_search`: Tests core HNSW functionality
+  - Validates accurate nearest neighbor search
+  - Tests with real BERT embeddings
+  - Verifies search result ordering
 
-- `test_hnsw_insert`: Tests 2.21µs insert speed
-  - Validates memory efficiency (3KB per vector)
-  - Ensures proper connection distribution
-  - Verifies zero-copy operations
+- `test_concurrent_operations`: Tests parallel access
+  - Validates thread safety
+  - Tests concurrent inserts and searches
+  - Ensures result consistency
 
-#### Temporal Engine
-- `test_temporal_decay`: Validates temporal relevance
-  - Tests decay calculations (201.37ns lookup)
-  - Verifies importance weighting accuracy
-  - Ensures temporal bias consistency
+### 2. Temporal Engine Tests
+Located in `tests/integration/temporal_test.rs`
 
-- `test_temporal_batch`: Tests batch operations
-  - Validates concurrent insert performance
-  - Ensures temporal ordering preservation
-  - Tests with varying batch sizes
+#### Temporal Scoring
+- `test_memory_storage_temporal`: Tests temporal relevance
+  - Validates time-based decay
+  - Tests importance weighting
+  - Verifies temporal vs. distance balance
+  ```rust
+  // Example: Testing temporal vs. distance weighting
+  let config = MemoryConfig {
+      temporal_weight: 0.3,  // 30% temporal, 70% distance
+      base_decay_rate: 0.1,  // Gradual decay
+      max_dimensions: 768,   // BERT dimensions
+      ..Default::default()
+  };
+  ```
 
-### 2. Concurrent Operations
-Located in `src/concurrency/tests/`
+#### Memory Operations
+- `test_memory_storage_importance`: Tests importance scoring
+  - Validates importance-based ranking
+  - Tests importance boundaries
+  - Verifies combined scoring (temporal + importance)
 
-#### Lock-Free Architecture
-- `test_concurrent_search`: Validates 10M+ QPS
-  - Tests parallel search operations
-  - Verifies result consistency
-  - Measures contention points
+- `test_memory_consolidation`: Tests memory management
+  - Validates memory cleanup
+  - Tests relationship preservation
+  - Ensures temporal consistency
 
-- `test_concurrent_insert`: Tests parallel inserts
-  - Validates zero-copy batch operations
-  - Ensures index consistency
-  - Tests with high concurrency (1000+ threads)
+### 3. Real-World Scenario Tests
 
-#### Memory Management
-- `test_zero_copy`: Validates memory efficiency
-  - Tests direct memory access
-  - Verifies no unnecessary allocations
-  - Ensures proper cleanup
+#### BERT Integration
+- Tests use 768-dimensional vectors to match BERT embeddings
+- Validates real-world embedding scenarios
+- Ensures compatibility with transformer models
 
-### 3. Performance Tests
-Located in `tests/performance/`
-
-#### Search Performance
+#### Temporal Relevance
 ```rust
-#[test]
-fn test_search_latency() {
-    let store = Store::new(Config::optimal());
-    let result = bench_search_latency(store);
-    assert!(result.p99 < Duration::from_nanos(100));
-    assert!(result.p50 < Duration::from_nanos(85));
+// Example: Real-world temporal decay test
+#[tokio::test]
+async fn test_temporal_decay() -> Result<()> {
+    let now = SystemTime::now();
+    let v1 = create_test_vector_with_time(
+        "1",
+        0.8,
+        now - Duration::from_secs(10)  // Older memory
+    );
+    let v2 = create_test_vector_with_time(
+        "2",
+        0.8,
+        now  // Recent memory
+    );
+    // Verify temporal decay affects ranking
 }
 ```
 
-#### Memory Efficiency
-```rust
-#[test]
-fn test_memory_usage() {
-    let store = Store::new(Config::zero_copy());
-    let usage = measure_memory_per_vector(store);
-    assert!(usage < 3 * 1024); // 3KB per vector
-}
-```
-
-### 4. Integration Tests
-Located in `tests/integration/`
-
-#### End-to-End Workflows
-- Search with temporal bias
-- Concurrent batch operations
-- Multi-context queries
-- Zero-copy insertions
-
-#### Error Handling
-- Invalid configurations
-- Out-of-bounds operations
-- Resource exhaustion
-- Concurrent failures
+#### Importance Weighting
+- Tests realistic importance values (0.0 to 1.0)
+- Validates importance-based memory retention
+- Ensures proper importance scaling
 
 ## 🚀 Running Tests
 
@@ -95,98 +98,92 @@ Located in `tests/integration/`
 # Run all tests
 cargo test
 
-# Run specific categories
-cargo test temporal    # Temporal engine tests
-cargo test hnsw       # HNSW implementation tests
-cargo test concurrent # Concurrency tests
+# Run specific test modules
+cargo test temporal_test      # Temporal engine tests
+cargo test distance_metrics  # Distance calculation tests
 ```
 
-### Performance Tests
+### Integration Tests
 ```bash
-# Run with performance logging
-RUST_LOG=debug cargo test --release performance
-
-# Run specific benchmarks
-cargo test bench_search_latency
-cargo test bench_memory_usage
+# Run with real BERT dimensions
+cargo test --test integration
 ```
 
 ## 📊 Performance Targets
 
 | Operation | Target | Current | Status |
 |-----------|--------|---------|---------|
-| Search Latency | < 100ns | 84.93ns | ✅ |
-| Insert Speed | < 3µs | 2.21µs | ✅ |
-| Memory/Vector | < 4KB | 3KB | ✅ |
-| QPS | > 5M | ~10M | ✅ |
+| Vector Similarity | < 1ms | ~500µs | ✅ |
+| Temporal Scoring | < 100µs | ~50µs | ✅ |
+| Memory Usage | < 4KB/vector | ~3KB | ✅ |
 
 ## 🔍 Coverage Requirements
 
 - Core Engine: 100% coverage
-- HNSW Implementation: 100% coverage
+- Vector Operations: 100% coverage
 - Temporal Engine: 100% coverage
-- Concurrency: 95%+ coverage
 - Error Handling: 100% coverage
 
 ## 🛠️ Adding New Tests
 
-1. Performance Requirements:
-   - Search tests must validate sub-100ns latency
-   - Insert tests must verify 3KB/vector efficiency
-   - Concurrent tests must demonstrate 10M+ QPS
+1. Real-World Requirements:
+   - Use 768-dimensional vectors for BERT compatibility
+   - Test with realistic temporal scenarios
+   - Validate importance-based ranking
 
 2. Test Structure:
    ```rust
-   #[test]
-   fn test_new_feature() {
-       // Setup with optimal configuration
-       let store = Store::new(Config::optimal());
+   #[tokio::test]
+   async fn test_new_feature() -> Result<()> {
+       // Configure with BERT dimensions
+       let config = MemoryConfig {
+           max_dimensions: 768,
+           temporal_weight: 0.3,
+           ..Default::default()
+       };
        
-       // Test with realistic workload
-       let result = store.operation()
-           .with_temporal_bias(0.3)
-           .zero_copy(true)
-           .execute()
-           .await?;
+       // Test with realistic vectors
+       let store = MemoryStorage::new(config, metric);
+       let result = store.operation().await?;
            
-       // Verify performance targets
-       assert!(result.latency < target_latency);
-       assert!(result.memory < target_memory);
+       // Verify correctness
+       assert!(validate_dimensions(&result));
+       assert!(verify_temporal_order(&result));
    }
    ```
 
 ## 🔄 Continuous Integration
 
 Our CI pipeline ensures:
-1. All tests pass on every commit
-2. Performance remains within targets
+1. All tests pass with BERT dimensions
+2. Temporal scoring remains accurate
 3. Memory usage stays optimal
-4. No regressions in core metrics
+4. No regressions in core functionality
 
 ## 📈 Performance Monitoring
 
 Tests include continuous monitoring of:
-1. Search latency distribution
-2. Memory usage patterns
-3. Concurrent operation throughput
-4. Temporal decay accuracy
+1. Vector similarity accuracy
+2. Temporal decay precision
+3. Memory efficiency
+4. Importance ranking accuracy
 
 ## 🎯 Future Improvements
 
-1. **Enhanced Performance Tests**
-   - More granular latency profiling
-   - Extended concurrency scenarios
-   - Memory pattern analysis
+1. **Enhanced Vector Tests**
+   - More edge case coverage
+   - Additional embedding types
+   - Cross-model compatibility
 
-2. **Additional Metrics**
-   - Cache hit ratios
-   - Lock contention patterns
-   - Memory fragmentation
+2. **Temporal Metrics**
+   - Long-term decay patterns
+   - Importance threshold analysis
+   - Memory consolidation efficiency
 
-3. **Automated Benchmarking**
-   - Continuous performance tracking
+3. **Automated Testing**
+   - Continuous accuracy tracking
    - Regression detection
-   - Optimization opportunities
+   - Optimization validation
 
 ---
 

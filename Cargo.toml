@@ -47,6 +47,9 @@ opentelemetry = { version = "0.20" }
 opentelemetry_sdk = { version = "0.20" }
 opentelemetry-otlp = { version = "0.13" }
 
+# Fast approximate nearest neighbor search
+hnsw_rs = "0.1.19"  # Pure Rust HNSW implementation
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 indicatif = "0.17"

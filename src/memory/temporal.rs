@@ -9,14 +9,57 @@ use crate::{
         config::MemoryConfig,
         error::{MemoryError, Result},
     },
-    storage::metrics::DistanceMetric,
+    storage::metrics::{DistanceMetric, CosineDistance as MetricCosineDistance},
     memory::types::TemporalVector,
 };
+use hnsw_rs::{
+    hnsw::{Hnsw as HnswIndex, Neighbour},
+    dist::Distance,
+};
+
+#[derive(Clone)]
+struct CosineDistance;
+
+impl Distance<Vec<f32>> for CosineDistance {
+    fn eval(&self, a: &[Vec<f32>], b: &[Vec<f32>]) -> f32 {
+        if a.is_empty() || b.is_empty() || a[0].len() != b[0].len() {
+            return f32::MAX;
+        }
+        
+        let va = &a[0];
+        let vb = &b[0];
+        
+        let mut dot_product = 0.0;
+        let mut norm_a = 0.0;
+        let mut norm_b = 0.0;
+        
+        for i in 0..va.len() {
+            dot_product += va[i] * vb[i];
+            norm_a += va[i] * va[i];
+            norm_b += vb[i] * vb[i];
+        }
+        
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return f32::MAX;
+        }
+        
+        let similarity = dot_product / (norm_a.sqrt() * norm_b.sqrt());
+        // Convert similarity to distance (0 to MAX)
+        if similarity > 1.0 {
+            0.0
+        } else if similarity < -1.0 {
+            2.0
+        } else {
+            1.0 - similarity
+        }
+    }
+}
 
 pub struct MemoryStorage {
     config: MemoryConfig,
     memories: RwLock<HashMap<String, TemporalVector>>,
     distance_metric: Arc<dyn DistanceMetric + Send + Sync>,
+    hnsw: Hnsw, // Add HNSW index
 }
 
 impl MemoryStorage {
@@ -28,6 +71,7 @@ impl MemoryStorage {
             memories: RwLock::new(HashMap::new()),
             config,
             distance_metric,
+            hnsw: Hnsw::new(), // Initialize HNSW index
         }
     }
 
@@ -45,17 +89,24 @@ impl MemoryStorage {
             return Err(MemoryError::InvalidImportance(memory.attributes.importance));
         }
 
-        let mut memories = self.memories.write();
+        // Add to HNSW index first
+        self.hnsw.add(&memory.vector.data, memory.vector.id.clone())
+            .map_err(|e| MemoryError::HnswError(e.to_string()))?;
 
-        // If memory already exists, merge relationships
-        if let Some(existing) = memories.get(&memory.vector.id) {
-            let mut updated = memory.clone();
-            let mut relationships: HashSet<_> = existing.attributes.relationships.iter().cloned().collect();
-            relationships.extend(updated.attributes.relationships.iter().cloned());
-            updated.attributes.relationships = relationships.into_iter().collect();
-            memories.insert(memory.vector.id.clone(), updated);
-        } else {
-            memories.insert(memory.vector.id.clone(), memory);
+        // Then add to memory store
+        {
+            let mut memories = self.memories.write();
+
+            // If memory already exists, merge relationships
+            if let Some(existing) = memories.get(&memory.vector.id) {
+                let mut updated = memory.clone();
+                let mut relationships: HashSet<_> = existing.attributes.relationships.iter().cloned().collect();
+                relationships.extend(updated.attributes.relationships.iter().cloned());
+                updated.attributes.relationships = relationships.into_iter().collect();
+                memories.insert(memory.vector.id.clone(), updated);
+            } else {
+                memories.insert(memory.vector.id.clone(), memory);
+            }
         }
 
         Ok(())
@@ -69,66 +120,43 @@ impl MemoryStorage {
     pub async fn search_similar(&self, query: &[f32], k: usize) -> Result<Vec<(TemporalVector, f32)>> {
         let memories = self.memories.read();
         let now = SystemTime::now();
+
+        // Use HNSW for approximate nearest neighbor search
+        let candidates = self.hnsw.search(query, k * 2)?; // Get more candidates to account for temporal reranking
         
-        // First calculate all distances
-        let results: Vec<_> = memories.values()
-            .map(|m| {
-                let distance = self.distance_metric.calculate_distance(&m.vector.data, query);
-                let time_diff = now.duration_since(m.attributes.timestamp)
-                    .unwrap_or(Duration::from_secs(0))
-                    .as_secs_f32();
-                
-                // Temporal score: more recent = higher score (closer to 1)
-                let temporal_score = (-self.config.base_decay_rate * time_diff).exp();
-                
-                (m.clone(), distance, temporal_score)
+        // Convert results and apply temporal scoring
+        let mut results: Vec<_> = candidates.into_iter()
+            .filter_map(|(id, distance)| {
+                memories.get(&id).map(|m| {
+                    let time_diff = now.duration_since(m.attributes.timestamp)
+                        .unwrap_or(Duration::from_secs(0))
+                        .as_secs_f32();
+                    
+                    // Temporal score: more recent = higher score (closer to 1)
+                    let temporal_score = (-self.config.base_decay_rate * time_diff).exp();
+                    
+                    // Distance is already normalized to [0, 2], temporal_score is [0, 1]
+                    // Scale temporal score to [0, 2] to match distance range
+                    let temporal_distance = 2.0 * (1.0 - temporal_score);
+                    
+                    // Combine distance and temporal scores with proper weighting
+                    let combined_score = 
+                        distance * (1.0 - self.config.temporal_weight) + 
+                        temporal_distance * self.config.temporal_weight;
+                    
+                    // Adjust score based on importance (higher importance = lower score)
+                    let final_score = combined_score / (1.0 + m.attributes.importance);
+                    
+                    (m.clone(), final_score)
+                })
             })
             .collect();
         
-        // Find max distance for normalization
-        let max_dist = results.iter()
-            .map(|(_, dist, _)| *dist)
-            .fold(0.0, f32::max);
+        // Sort by final score (lower is better)
+        results.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(k);
         
-        // Calculate combined scores
-        let mut scored_results: Vec<_> = results.into_iter()
-            .map(|(m, dist, temporal)| {
-                // Normalize distance to [0,1]
-                let dist_norm = if max_dist > 0.0 { dist / max_dist } else { 0.0 };
-                
-                // Weight-based scoring:
-                // - base_decay_rate determines influence of temporal score
-                // - importance has a fixed weight
-                let temporal_weight = self.config.base_decay_rate;
-                let importance_weight = 0.3;  // Fixed weight for importance
-                let distance_weight = 1.0 - temporal_weight - importance_weight;
-                
-                let score = 
-                    distance_weight * dist_norm +                     // Distance component
-                    temporal_weight * (1.0 - temporal) +             // Temporal component
-                    importance_weight * (1.0 - m.attributes.importance); // Importance component
-                
-                (m, score, temporal)  // Keep temporal for tiebreaking
-            })
-            .collect();
-        
-        // Sort by score (lower is better), break ties by recency
-        scored_results.sort_by(|a, b| {
-            let (_, a_score, a_temporal) = a;
-            let (_, b_score, b_temporal) = b;
-            
-            match a_score.partial_cmp(b_score) {
-                Some(std::cmp::Ordering::Equal) => b_temporal.partial_cmp(a_temporal)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-                ord => ord.unwrap_or(std::cmp::Ordering::Equal)
-            }
-        });
-        
-        scored_results.truncate(k);
-        
-        Ok(scored_results.into_iter()
-            .map(|(m, score, _)| (m, score))
-            .collect())
+        Ok(results)
     }
 
     pub async fn update_memory_decay(&mut self) -> Result<()> {
@@ -284,8 +312,70 @@ impl MemoryStorage {
     }
 }
 
+impl Default for MemoryStorage {
+    fn default() -> Self {
+        let config = MemoryConfig::default();
+        let distance_metric = Arc::new(MetricCosineDistance::new());
+        Self {
+            config,
+            memories: RwLock::new(HashMap::new()),
+            distance_metric,
+            hnsw: Hnsw::new(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ContextSummary {
     pub memory_count: usize,
     pub average_importance: f32,
+}
+
+struct Hnsw {
+    index: HnswIndex<Vec<f32>, CosineDistance>,
+    next_id: usize,
+    id_map: HashMap<String, usize>,
+}
+
+impl Hnsw {
+    fn new() -> Self {
+        let max_nb_connection = 16;
+        let max_elements = 10_000;
+        let max_layer = 16;
+        let ef_construction = 200;
+        
+        Hnsw {
+            index: HnswIndex::new(
+                max_nb_connection,
+                max_elements,
+                max_layer,
+                ef_construction,
+                CosineDistance,
+            ),
+            next_id: 0,
+            id_map: HashMap::new(),
+        }
+    }
+
+    fn add(&mut self, data: &[f32], id: String) -> Result<()> {
+        let node_id = self.next_id;
+        self.next_id += 1;
+        
+        self.index.insert((&vec![data.to_vec()], node_id));
+        self.id_map.insert(id, node_id);
+        Ok(())
+    }
+
+    fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
+        let ef = k * 2; // Use larger ef for better recall
+        let neighbors = self.index.search(&[query.to_vec()], k, ef);
+        
+        Ok(neighbors.into_iter()
+            .filter_map(|n| {
+                self.id_map.iter()
+                    .find(|(_, &id)| id == n.d_id)
+                    .map(|(key, _)| (key.clone(), n.distance))
+            })
+            .collect())
+    }
 }
