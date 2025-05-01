@@ -13,7 +13,7 @@ use crate::{
     memory::types::TemporalVector,
 };
 use hnsw_rs::{
-    hnsw::{Hnsw as HnswIndex, Neighbour},
+    hnsw::Hnsw as HnswIndex,
     dist::Distance,
 };
 
@@ -25,24 +25,24 @@ impl Distance<Vec<f32>> for CosineDistance {
         if a.is_empty() || b.is_empty() || a[0].len() != b[0].len() {
             return f32::MAX;
         }
-        
+
         let va = &a[0];
         let vb = &b[0];
-        
+
         let mut dot_product = 0.0;
         let mut norm_a = 0.0;
         let mut norm_b = 0.0;
-        
+
         for i in 0..va.len() {
             dot_product += va[i] * vb[i];
             norm_a += va[i] * va[i];
             norm_b += vb[i] * vb[i];
         }
-        
+
         if norm_a == 0.0 || norm_b == 0.0 {
             return f32::MAX;
         }
-        
+
         let similarity = dot_product / (norm_a.sqrt() * norm_b.sqrt());
         // Convert similarity to distance (0 to MAX)
         if similarity > 1.0 {
@@ -123,7 +123,7 @@ impl MemoryStorage {
 
         // Use HNSW for approximate nearest neighbor search
         let candidates = self.hnsw.search(query, k * 2)?; // Get more candidates to account for temporal reranking
-        
+
         // Convert results and apply temporal scoring
         let mut results: Vec<_> = candidates.into_iter()
             .filter_map(|(id, distance)| {
@@ -131,31 +131,31 @@ impl MemoryStorage {
                     let time_diff = now.duration_since(m.attributes.timestamp)
                         .unwrap_or(Duration::from_secs(0))
                         .as_secs_f32();
-                    
+
                     // Temporal score: more recent = higher score (closer to 1)
                     let temporal_score = (-self.config.base_decay_rate * time_diff).exp();
-                    
+
                     // Distance is already normalized to [0, 2], temporal_score is [0, 1]
                     // Scale temporal score to [0, 2] to match distance range
                     let temporal_distance = 2.0 * (1.0 - temporal_score);
-                    
+
                     // Combine distance and temporal scores with proper weighting
-                    let combined_score = 
-                        distance * (1.0 - self.config.temporal_weight) + 
+                    let combined_score =
+                        distance * (1.0 - self.config.temporal_weight) +
                         temporal_distance * self.config.temporal_weight;
-                    
+
                     // Adjust score based on importance (higher importance = lower score)
                     let final_score = combined_score / (1.0 + m.attributes.importance);
-                    
+
                     (m.clone(), final_score)
                 })
             })
             .collect();
-        
+
         // Sort by final score (lower is better)
         results.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
-        
+
         Ok(results)
     }
 
@@ -174,7 +174,7 @@ impl MemoryStorage {
 
             let access_factor = 1.0 / (1.0 + memory.attributes.access_count as f32).ln();
             let decay = self.config.base_decay_rate * age * access_factor * recency;
-            
+
             memory.attributes.importance = (memory.attributes.importance * (1.0 - decay))
                 .max(self.config.min_importance)
                 .min(self.config.max_importance);
@@ -207,37 +207,37 @@ impl MemoryStorage {
     pub async fn search_by_context(&self, context: &str, query: &[f32], k: usize) -> Result<Vec<(TemporalVector, f32)>> {
         let memories = self.memories.read();
         let now = SystemTime::now();
-        
+
         let context_memories: Vec<_> = memories.values()
             .filter(|m| m.attributes.context == context)
             .collect();
-        
+
         let mut results: Vec<_> = context_memories.into_iter()
             .map(|m| {
                 let distance = self.distance_metric.calculate_distance(&m.vector.data, query);
                 let time_diff = now.duration_since(m.attributes.timestamp)
                     .unwrap_or(Duration::from_secs(0))
                     .as_secs_f32();
-                
+
                 // Temporal score: more recent = higher score (closer to 1)
                 let temporal_score = (-self.config.base_decay_rate * time_diff).exp();
-                
+
                 // Combine scores with configurable weights
                 let similarity_weight = 0.4;
                 let temporal_weight = 0.4;
                 let importance_weight = 0.2;
-                
+
                 let score = (distance * similarity_weight) -
                            (temporal_score * temporal_weight) -
                            (m.attributes.importance * importance_weight);
-                
+
                 (m.clone(), score)
             })
             .collect();
-        
+
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
-        
+
         Ok(results)
     }
 
@@ -343,7 +343,7 @@ impl Hnsw {
         let max_elements = 10_000;
         let max_layer = 16;
         let ef_construction = 200;
-        
+
         Hnsw {
             index: HnswIndex::new(
                 max_nb_connection,
@@ -360,7 +360,7 @@ impl Hnsw {
     fn add(&mut self, data: &[f32], id: String) -> Result<()> {
         let node_id = self.next_id;
         self.next_id += 1;
-        
+
         self.index.insert((&vec![data.to_vec()], node_id));
         self.id_map.insert(id, node_id);
         Ok(())
@@ -369,7 +369,7 @@ impl Hnsw {
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
         let ef = k * 2; // Use larger ef for better recall
         let neighbors = self.index.search(&[query.to_vec()], k, ef);
-        
+
         Ok(neighbors.into_iter()
             .filter_map(|n| {
                 self.id_map.iter()

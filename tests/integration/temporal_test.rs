@@ -269,10 +269,10 @@ async fn test_memory_storage_temporal() -> Result<()> {
     storage.save_memory(v1.clone()).await?;
     storage.save_memory(v2.clone()).await?;
 
-    // Search with v1's vector - v1 should come first due to higher similarity
+    // Search with v1's vector
     let results = storage.search_similar(&v1_data, 2).await?;
     assert_eq!(results.len(), 2);
-    
+
     // First result should be v1 (most similar) since distance weight (0.7) > temporal weight (0.3)
     assert_eq!(results[0].0.vector.id, "1");
     assert_eq!(results[1].0.vector.id, "2");
@@ -302,7 +302,7 @@ async fn test_memory_storage_importance() -> Result<()> {
     let query = v1.vector.data.clone();
     let results = storage.search_similar(&query, 3).await?;
     assert_eq!(results.len(), 3);
-    
+
     // Get importance values of results
     let mut importance_order = Vec::new();
     for (id, _) in &results {
@@ -366,7 +366,7 @@ async fn test_memory_storage_concurrent() -> Result<()> {
             );
             let query = vector.vector.data.clone();
             storage.write().await.save_memory(vector).await.unwrap();
-            
+
             // Perform a search operation while other tasks are writing
             storage.read().await.search_similar(&query, 5).await.unwrap()
         });

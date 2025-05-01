@@ -81,43 +81,124 @@ Our benchmarks are continuously updated and available in [docs/BENCHMARKS.md](do
 
 ### Installation
 
+#### From Source
+
+```bash
+# Clone the repository
+git clone https://github.com/JtPerez-Acle/chrono-mind.git
+cd chrono-mind
+
+# Build the project
+cargo build --release
+```
+
+#### As a Library
+
 ```toml
 [dependencies]
-chronomind = "0.1.0"
+vector-store = { git = "https://github.com/your-org/chrono-mind.git" }
 ```
 
-### Basic Usage
+### CLI Usage
+
+```bash
+# Save sample vectors
+./target/release/vector-store save --input examples/sample_vectors.json --output vectors.store --dimensions 4 --normalize
+
+# Query vectors
+./target/release/vector-store query --file vectors.store --vector "[0.1, 0.2, 0.3, 0.4]" --limit 3 --normalize
+
+# Query vectors with context filtering
+./target/release/vector-store query --file vectors.store --vector "[0.1, 0.2, 0.3, 0.4]" --context "my_context" --limit 5
+
+# Get statistics
+./target/release/vector-store stats --file vectors.store
+```
+
+#### CLI Features
+
+- **Progress Bars**: Visual feedback for large vector operations
+- **Vector Normalization**: Automatically normalize vectors to unit length with `--normalize` flag
+- **Context Filtering**: Filter query results by context with `--context` option
+- **User-Friendly Error Messages**: Clear guidance when errors occur
+- **Flexible Vector Input**: Support for both JSON array and comma-separated formats
+
+### Library Usage
 
 ```rust
-use chronomind::{MemoryStorage, MemoryConfig};
+use std::sync::Arc;
+use vector_store::{
+    core::config::MemoryConfig,
+    memory::temporal::MemoryStorage,
+    memory::types::{MemoryAttributes, TemporalVector, Vector},
+    storage::metrics::CosineDistance,
+};
 
-// Initialize store
-let store = MemoryStorage::new(MemoryConfig::default())?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create configuration
+    let config = MemoryConfig::default();
 
-// Add vectors
-store.save_memory(vector).await?;
+    // Create storage with cosine distance metric
+    let metric = Arc::new(CosineDistance::new());
+    let mut storage = MemoryStorage::new(config, metric);
 
-// Search
-let results = store.search_similar(&query, 10).await?;
+    // Create and save a vector
+    let vector = Vector::new(
+        "vector1".to_string(),
+        vec![0.1, 0.2, 0.3, 0.4],
+    );
+
+    let temporal = TemporalVector::new(
+        vector,
+        MemoryAttributes::default(),
+    );
+
+    // Save the vector
+    storage.save_memory(temporal).await?;
+
+    // Query similar vectors
+    let query = vec![0.1, 0.2, 0.3, 0.4];
+    let results = storage.search_similar(&query, 10).await?;
+
+    for (memory, score) in results {
+        println!("ID: {}, Score: {}", memory.vector.id, score);
+    }
+
+    Ok(())
+}
 ```
 
-## API
+## Documentation
 
-See [API Documentation](docs/API.md) for detailed usage.
+- [User Guide](docs/USER_GUIDE.md): Detailed instructions for using ChronoMind
+- [Code Review](docs/CODE_REVIEW.md): Comprehensive review of the codebase
+- [Data Flow](docs/DATA_FLOW.md): Analysis of how data flows through the system
+- [Future Improvements](docs/FUTURE_IMPROVEMENTS.md): Roadmap for future development
+- [API Documentation](docs/API.md): Detailed API reference
 
 ### Core Components
 
 - `MemoryStorage`: Primary interface for vector operations
 - `TemporalVector`: Vector type with temporal metadata
-- `SearchConfig`: Configuration for search parameters
+- `MemoryBackend`: Storage backend for persistence
+- `MemoryConfig`: Configuration for the vector store
 
 ### Configuration Options
 
 ```rust
 pub struct MemoryConfig {
-    pub max_connections: usize,    // Default: 16
-    pub ef_construction: usize,    // Default: 100
-    pub decay_rate: f32,          // Default: 0.1
+    pub max_dimensions: usize,     // Default: 768 (BERT dimensions)
+    pub max_memories: usize,       // Default: 1000
+    pub min_importance: f32,       // Default: 0.0
+    pub max_importance: f32,       // Default: 1.0
+    pub base_decay_rate: f32,      // Default: 0.1
+    pub temporal_weight: f32,      // Default: 0.3
+    pub similarity_threshold: f32, // Default: 0.8
+    pub max_relationships: usize,  // Default: 50
+    pub consolidation_window: Duration, // Default: 24 hours
+    pub similar_memory_count: usize, // Default: 10
+    pub max_context_window: usize, // Default: 1000
 }
 ```
 

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- CLI interface with commands for save, query, and stats
+- Persistence layer tests
+- User guide documentation
+- Developer quick start guide
+- Sample vector data for testing
+- Code review documentation
+- Data flow analysis
+- Future improvements roadmap
+- TODO list for future development
 - New modular codebase structure with clear separation of concerns:
   - `core`: Essential components (error, config, logging)
   - `memory`: Memory management (temporal, traits, types)
@@ -112,6 +121,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Normalized vector generation for consistent distance measurements
 
 ### Changed
+- Updated README with installation and usage instructions
+- Improved error handling in persistence layer
+- Fixed dimension validation in tests
 - Restructured entire codebase for better modularity
 - Improved code organization with clear module boundaries
 - Enhanced public API with better type re-exports
@@ -237,6 +249,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enhanced memory management in vector operations
 
 ### Fixed
+- Fixed argument order in search_by_context method call
+- Removed unused imports
 - Memory leaks in concurrent operations
 - Race conditions in memory updates
 - Inconsistent error handling
