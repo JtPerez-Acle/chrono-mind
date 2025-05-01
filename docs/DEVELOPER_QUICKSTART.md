@@ -14,7 +14,7 @@ This guide will help you get started with developing ChronoMind quickly. It prov
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/chrono-mind.git
+git clone https://github.com/JtPerez-Acle/chrono-mind.git
 cd chrono-mind
 
 # Build the project
