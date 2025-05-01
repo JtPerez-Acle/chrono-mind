@@ -96,7 +96,7 @@ cargo build --release
 
 ```toml
 [dependencies]
-vector-store = { git = "https://github.com/your-org/chrono-mind.git" }
+vector-store = { git = "https://github.com/JtPerez-Acle/chrono-mind.git" }
 ```
 
 ### CLI Usage
