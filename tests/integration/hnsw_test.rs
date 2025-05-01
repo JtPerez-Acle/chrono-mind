@@ -209,7 +209,8 @@ async fn test_layer_stats() -> Result<()> {
 
     let stats = index.get_layer_stats().await?;
     assert!(stats.total_nodes > 0);
-    assert!(stats.total_connections >= 0);
+    // total_connections is always >= 0 as it's an unsigned type
+    assert_ne!(stats.total_connections, 0);
     assert!(stats.avg_connections >= 0.0);
 
     Ok(())

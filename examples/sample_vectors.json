@@ -1,0 +1,37 @@
+[
+  {
+    "id": "vector1",
+    "data": [0.1, 0.2, 0.3, 0.4],
+    "importance": 0.8,
+    "context": "context_a",
+    "decay_rate": 0.1
+  },
+  {
+    "id": "vector2",
+    "data": [0.2, 0.3, 0.4, 0.5],
+    "importance": 0.6,
+    "context": "context_b",
+    "decay_rate": 0.2
+  },
+  {
+    "id": "vector3",
+    "data": [0.3, 0.4, 0.5, 0.6],
+    "importance": 0.7,
+    "context": "context_a",
+    "decay_rate": 0.15
+  },
+  {
+    "id": "vector4",
+    "data": [0.4, 0.5, 0.6, 0.7],
+    "importance": 0.9,
+    "context": "context_c",
+    "decay_rate": 0.05
+  },
+  {
+    "id": "vector5",
+    "data": [0.5, 0.6, 0.7, 0.8],
+    "importance": 0.5,
+    "context": "context_b",
+    "decay_rate": 0.25
+  }
+]

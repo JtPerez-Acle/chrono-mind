@@ -104,9 +104,14 @@ impl MemoryBackend {
         }
     }
 
+    /// Get the current configuration
+    pub fn get_config(&self) -> &MemoryConfig {
+        &self.store.config
+    }
+
     async fn save(&mut self, memory: &TemporalVector) -> Result<()> {
         let _span = self.tracer.start("save_memory");
-        
+
         validate_vector_dimensions(&memory.vector, &self.store.config)?;
         validate_vector_data(&memory.vector)?;
 
@@ -129,7 +134,14 @@ impl MemoryBackend {
         self.store.list_memories().into_iter().cloned().collect()
     }
 
-    async fn count(&self) -> usize {
+    /// List all memories in the store
+    pub async fn list_all(&self) -> Result<Vec<TemporalVector>> {
+        let _span = self.tracer.start("list_all_memories");
+        Ok(self.store.list_memories().into_iter().cloned().collect())
+    }
+
+    /// Get the count of memories in the store
+    pub async fn count(&self) -> usize {
         let _span = self.tracer.start("count_memories");
         self.store.memory_count()
     }
@@ -165,6 +177,9 @@ pub trait StorageBackend {
 
     /// Get memory storage statistics
     async fn get_stats(&self) -> Result<MemoryStats>;
+
+    /// Get the count of memories in the store
+    async fn count(&self) -> Result<usize>;
 
     /// Backup memory store to file
     async fn backup(&self, path: PathBuf) -> Result<()>;
@@ -219,7 +234,7 @@ impl StorageBackend for MemoryBackend {
         for memory in memories {
             total_importance += memory.attributes.importance;
             total_size += memory.vector.data.len();
-            
+
             *context_distribution
                 .entry(memory.attributes.context.clone())
                 .or_insert(0) += 1;
@@ -261,6 +276,11 @@ impl StorageBackend for MemoryBackend {
             context_distribution,
             most_connected_memories,
         })
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn count(&self) -> Result<usize> {
+        Ok(self.count().await)
     }
 
     #[tracing::instrument(skip(self))]
