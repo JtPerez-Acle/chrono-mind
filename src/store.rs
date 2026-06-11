@@ -1,10 +1,10 @@
 //! The [`ChronoMind`] store: temporal scoring, decay, contexts, and
 //! relationships over a vector index.
 //!
-//! In the current milestone the store is backed by an exact linear scan;
-//! the HNSW index replaces it in the next milestone without changing this
-//! public API. Methods that mutate take `&mut self` for now — the lock-free
-//! index milestone relaxes writes to `&self`.
+//! Searches go through an HNSW index (see [`crate::index`]) and are then
+//! reranked by the temporal scoring formula documented on
+//! [`ChronoMind::search`]. Methods that mutate take `&mut self` for now —
+//! the lock-free index milestone relaxes writes to `&self`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -14,10 +14,16 @@ use tracing::{debug, instrument};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::index::{RwLockHnsw, VectorIndex};
 use crate::metric::{CosineDistance, DistanceMetric};
 use crate::types::{ContextSummary, Memory, MemoryStats};
 
 const SECONDS_PER_HOUR: f32 = 3600.0;
+
+/// Oversampling factor: the index is asked for `max(ef_search, k * OVERSAMPLE)`
+/// candidates before temporal reranking, so that recency can promote
+/// memories that are geometrically close but not in the top `k`.
+const OVERSAMPLE: usize = 3;
 
 /// A temporal vector store.
 ///
@@ -26,6 +32,11 @@ pub struct ChronoMind {
     config: Config,
     metric: Arc<dyn DistanceMetric>,
     memories: HashMap<String, Memory>,
+    index: RwLockHnsw,
+    /// External id -> live index handle.
+    handles: HashMap<String, u32>,
+    /// Live index handle -> external id.
+    names: HashMap<u32, String>,
 }
 
 impl std::fmt::Debug for ChronoMind {
@@ -47,10 +58,14 @@ impl ChronoMind {
     /// Create a store with a custom distance metric.
     pub fn with_metric(config: Config, metric: Arc<dyn DistanceMetric>) -> Result<Self> {
         config.validate()?;
+        let index = RwLockHnsw::new(config.index.clone(), Arc::clone(&metric));
         Ok(Self {
             config,
             metric,
             memories: HashMap::new(),
+            index,
+            handles: HashMap::new(),
+            names: HashMap::new(),
         })
     }
 
@@ -91,6 +106,7 @@ impl ChronoMind {
             links.extend(new_links);
             links.truncate(self.config.max_relationships);
             memory.attributes.relationships = links;
+            self.unindex(&memory.vector.id);
         } else if self.memories.len() >= self.config.max_memories {
             return Err(Error::CapacityExceeded(self.config.max_memories));
         } else {
@@ -100,8 +116,19 @@ impl ChronoMind {
                 .truncate(self.config.max_relationships);
         }
 
+        let handle = self.index.insert(&memory.vector.data);
+        self.handles.insert(memory.vector.id.clone(), handle);
+        self.names.insert(handle, memory.vector.id.clone());
         self.memories.insert(memory.vector.id.clone(), memory);
         Ok(())
+    }
+
+    /// Tombstone `id`'s entry in the index, if it has one.
+    fn unindex(&mut self, id: &str) {
+        if let Some(handle) = self.handles.remove(id) {
+            self.names.remove(&handle);
+            self.index.remove(handle);
+        }
     }
 
     /// Get a memory by id.
@@ -121,7 +148,11 @@ impl ChronoMind {
 
     /// Remove a memory by id, returning it if present.
     pub fn remove(&mut self, id: &str) -> Option<Memory> {
-        self.memories.remove(id)
+        let removed = self.memories.remove(id);
+        if removed.is_some() {
+            self.unindex(id);
+        }
+        removed
     }
 
     /// Iterate over all stored memories in arbitrary order.
@@ -142,12 +173,37 @@ impl ChronoMind {
     /// Lower scores are better. Results are `(memory, score)` pairs sorted
     /// ascending. This formula is the single definition of temporal
     /// relevance used everywhere in the crate.
+    ///
+    /// The index supplies `max(ef_search, 3 * k)` geometric candidates and
+    /// the formula reranks those; a memory outside that candidate pool
+    /// cannot be returned, however fresh. Raise
+    /// [`ef_search`](crate::IndexParams::ef_search) to widen the pool.
     #[instrument(skip(self, query))]
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(Memory, f32)>> {
-        self.search_filtered(query, k, |_| true)
+        self.validate_query(query)?;
+        let ef = self.config.index.ef_search.max(k * OVERSAMPLE);
+        let now = SystemTime::now();
+
+        let mut scored: Vec<(Memory, f32)> = self
+            .index
+            .search(query, ef)
+            .into_iter()
+            .filter_map(|(handle, distance)| {
+                let id = self.names.get(&handle)?;
+                let memory = self.memories.get(id)?;
+                Some((memory.clone(), self.combined_score(distance, memory, now)))
+            })
+            .collect();
+
+        scored.sort_by(|(_, a), (_, b)| a.total_cmp(b));
+        scored.truncate(k);
+        Ok(scored)
     }
 
     /// Like [`search`](Self::search), restricted to one context label.
+    ///
+    /// Context filtering scans the context's members exactly rather than
+    /// going through the index, so sparse contexts never come back short.
     #[instrument(skip(self, query))]
     pub fn search_in_context(
         &self,
@@ -155,15 +211,25 @@ impl ChronoMind {
         query: &[f32],
         k: usize,
     ) -> Result<Vec<(Memory, f32)>> {
-        self.search_filtered(query, k, |m| m.attributes.context == context)
+        self.validate_query(query)?;
+        let now = SystemTime::now();
+
+        let mut scored: Vec<(Memory, f32)> = self
+            .memories
+            .values()
+            .filter(|m| m.attributes.context == context)
+            .map(|m| {
+                let distance = self.metric.distance(&m.vector.data, query);
+                (m.clone(), self.combined_score(distance, m, now))
+            })
+            .collect();
+
+        scored.sort_by(|(_, a), (_, b)| a.total_cmp(b));
+        scored.truncate(k);
+        Ok(scored)
     }
 
-    fn search_filtered(
-        &self,
-        query: &[f32],
-        k: usize,
-        filter: impl Fn(&Memory) -> bool,
-    ) -> Result<Vec<(Memory, f32)>> {
+    fn validate_query(&self, query: &[f32]) -> Result<()> {
         if query.len() != self.config.dimensions {
             return Err(Error::InvalidDimensions {
                 got: query.len(),
@@ -175,21 +241,7 @@ impl ChronoMind {
                 "query contains NaN or infinite components".into(),
             ));
         }
-
-        let now = SystemTime::now();
-        let mut scored: Vec<(Memory, f32)> = self
-            .memories
-            .values()
-            .filter(|m| filter(m))
-            .map(|m| {
-                let distance = self.metric.distance(&m.vector.data, query);
-                (m.clone(), self.combined_score(distance, m, now))
-            })
-            .collect();
-
-        scored.sort_by(|(_, a), (_, b)| a.total_cmp(b));
-        scored.truncate(k);
-        Ok(scored)
+        Ok(())
     }
 
     /// The single temporal scoring formula. See [`search`](Self::search).
@@ -274,6 +326,7 @@ impl ChronoMind {
                     .memories
                     .remove(&drop_id)
                     .expect("id listed and not yet absorbed");
+                self.unindex(&drop_id);
                 let keeper = self
                     .memories
                     .get_mut(&keep_id)

@@ -12,6 +12,7 @@ keywords = ["vector-store", "hnsw", "temporal", "memory", "ai"]
 categories = ["data-structures", "database-implementations"]
 
 [dependencies]
+rand = "0.8"
 thiserror = "1.0"
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
@@ -23,7 +24,13 @@ indicatif = "0.17"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+proptest = "1.4"
 tempfile = "3.8"
+
+# Recall tests do millions of 768-dimensional distance computations;
+# unoptimized test binaries make them unbearably slow.
+[profile.test]
+opt-level = 2
 
 [[bin]]
 name = "chronomind"
