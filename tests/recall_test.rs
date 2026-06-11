@@ -91,7 +91,7 @@ fn measure_recall(
 ) -> f64 {
     let index = build_index(which, seed);
     for v in data {
-        index.insert(v);
+        index.insert(v).unwrap();
     }
 
     let mut total = 0.0;
@@ -170,7 +170,7 @@ fn gate_tombstones(which: Impl) {
 
     let index = build_index(which, 0xDEAD);
     for v in &data {
-        index.insert(v);
+        index.insert(v).unwrap();
     }
     for id in 0..(N as u32) {
         if id % 3 == 0 {

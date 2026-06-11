@@ -94,6 +94,54 @@ fn unsupported_version_is_rejected() {
 }
 
 #[test]
+fn corrupted_body_is_rejected_by_checksum() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corrupt.chrono");
+    save_snapshot(&sample_store(), &path).unwrap();
+
+    // Flip one byte in the middle of the body.
+    let mut bytes = fs::read(&path).unwrap();
+    let target = bytes.len() / 2;
+    bytes[target] ^= 0xFF;
+    fs::write(&path, &bytes).unwrap();
+
+    let err = load_snapshot(&path).unwrap_err();
+    assert!(
+        matches!(err, Error::InvalidSnapshot(_)) && err.to_string().contains("checksum"),
+        "expected checksum rejection, got: {err}"
+    );
+}
+
+#[test]
+fn save_replaces_existing_snapshot_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replace.chrono");
+
+    save_snapshot(&sample_store(), &path).unwrap();
+    let first = fs::read(&path).unwrap();
+
+    // Overwrite with a different store; the file must be fully replaced.
+    let small = ChronoMind::new(Config {
+        dimensions: 4,
+        ..Config::default()
+    })
+    .unwrap();
+    small
+        .insert(Memory::from_vector(Vector::new(
+            "only",
+            vec![1.0, 0.0, 0.0, 0.0],
+        )))
+        .unwrap();
+    save_snapshot(&small, &path).unwrap();
+
+    let second = fs::read(&path).unwrap();
+    assert_ne!(first, second);
+    let loaded = load_snapshot(&path).unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert!(loaded.get("only").is_some());
+}
+
+#[test]
 fn missing_file_is_io_error() {
     assert!(matches!(
         load_snapshot(std::path::Path::new("does/not/exist.chrono")),

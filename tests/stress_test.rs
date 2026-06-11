@@ -51,7 +51,7 @@ fn lockfree_index_survives_16_thread_hammering() {
         .map(|_| unit_vector(&mut rng, DIM))
         .collect();
     for v in &seed_data {
-        index.insert(v);
+        index.insert(v).unwrap();
     }
 
     let searches_done = Arc::new(AtomicUsize::new(0));
@@ -74,7 +74,7 @@ fn lockfree_index_survives_16_thread_hammering() {
                             // 4/20 = 20% inserts
                             0 | 5 | 10 | 15 => {
                                 let v = unit_vector(&mut rng, DIM);
-                                let handle = index.insert(&v);
+                                let handle = index.insert(&v).unwrap();
                                 inserted.push((handle, v));
                             }
                             // 1/20 = 5% removes (own inserts only)
@@ -200,7 +200,7 @@ fn recall_holds_during_concurrent_churn() {
     let mut rng = StdRng::seed_from_u64(0xC4A2);
     let base: Vec<Vec<f32>> = (0..BASE).map(|_| unit_vector(&mut rng, DIM)).collect();
     for v in &base {
-        index.insert(v); // handles 0..BASE, single-threaded
+        index.insert(v).unwrap(); // handles 0..BASE, single-threaded
     }
 
     // Ground truth against the quiescent pre-churn corpus.
@@ -227,7 +227,7 @@ fn recall_holds_during_concurrent_churn() {
             s.spawn(move || {
                 let mut rng = StdRng::seed_from_u64(0xC4A2 + 1 + t as u64);
                 for _ in 0..CHURN_PER_THREAD {
-                    index.insert(&unit_vector(&mut rng, DIM));
+                    index.insert(&unit_vector(&mut rng, DIM)).unwrap();
                 }
                 done.fetch_add(1, Ordering::Release);
             });

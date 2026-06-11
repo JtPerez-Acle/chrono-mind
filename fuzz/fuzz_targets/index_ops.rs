@@ -59,7 +59,7 @@ fuzz_target!(|ops: Vec<Op>| {
         match op {
             Op::Insert(raw) => {
                 if let Some(v) = to_vector(raw) {
-                    handles.push(index.insert(&v));
+                    handles.push(index.insert(&v).unwrap());
                 }
             }
             Op::Remove(pick) => {

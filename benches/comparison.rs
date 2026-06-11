@@ -143,7 +143,7 @@ fn insert_throughput(c: &mut Criterion) {
                         for _ in 0..iters {
                             let index = which.build();
                             total += timed_parallel(threads, &data, |v| {
-                                index.insert(v);
+                                index.insert(v).unwrap();
                             });
                         }
                         total
@@ -166,7 +166,7 @@ fn search_qps(c: &mut Criterion) {
     for which in IMPLS {
         let index = which.build();
         for v in &corpus {
-            index.insert(v);
+            index.insert(v).unwrap();
         }
         for threads in THREAD_COUNTS {
             group.bench_with_input(
@@ -207,7 +207,7 @@ fn mixed_90_10(c: &mut Criterion) {
             // iteration would dominate the benchmark's wall time.
             let index = which.build();
             for v in &corpus {
-                index.insert(v);
+                index.insert(v).unwrap();
             }
             group.bench_with_input(
                 BenchmarkId::new(which.name(), threads),
@@ -218,7 +218,7 @@ fn mixed_90_10(c: &mut Criterion) {
                         for _ in 0..iters {
                             total += timed_parallel(threads, &indexed, |&(i, v)| {
                                 if i % 10 == 0 {
-                                    index.insert(v);
+                                    index.insert(v).unwrap();
                                 } else {
                                     std::hint::black_box(index.search(v, 50));
                                 }

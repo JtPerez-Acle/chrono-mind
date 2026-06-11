@@ -233,13 +233,12 @@ impl RwLockHnsw {
 }
 
 impl VectorIndex for RwLockHnsw {
-    fn insert(&self, vector: &[f32]) -> u32 {
+    fn insert(&self, vector: &[f32]) -> Option<u32> {
         let mut inner = self.inner.write().expect("index lock poisoned");
         let inner = &mut *inner;
-        assert!(
-            inner.nodes.len() < u32::MAX as usize,
-            "index is full: u32 handle space exhausted"
-        );
+        if inner.nodes.len() >= u32::MAX as usize {
+            return None; // u32 handle space exhausted
+        }
 
         let id = inner.nodes.len() as u32;
         let top_layer = self.random_layer(&mut inner.rng);
@@ -253,7 +252,7 @@ impl VectorIndex for RwLockHnsw {
             });
             inner.entry = Some(id);
             inner.live += 1;
-            return id;
+            return Some(id);
         };
 
         let entry_layer = inner.nodes[entry as usize].top_layer();
@@ -304,7 +303,7 @@ impl VectorIndex for RwLockHnsw {
             inner.entry = Some(id);
         }
         inner.live += 1;
-        id
+        Some(id)
     }
 
     fn remove(&self, id: u32) -> bool {
@@ -364,7 +363,7 @@ mod tests {
     #[test]
     fn single_vector_is_found() {
         let idx = index();
-        let id = idx.insert(&[1.0, 0.0]);
+        let id = idx.insert(&[1.0, 0.0]).unwrap();
         let results = idx.search(&[1.0, 0.0], 10);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, id);
@@ -374,9 +373,9 @@ mod tests {
     #[test]
     fn nearest_is_ranked_first() {
         let idx = index();
-        let near = idx.insert(&[1.0, 0.05]);
-        let _far = idx.insert(&[0.0, 1.0]);
-        let _mid = idx.insert(&[0.5, 0.5]);
+        let near = idx.insert(&[1.0, 0.05]).unwrap();
+        let _far = idx.insert(&[0.0, 1.0]).unwrap();
+        let _mid = idx.insert(&[0.5, 0.5]).unwrap();
 
         let results = idx.search(&[1.0, 0.0], 3);
         assert_eq!(results[0].0, near);
@@ -387,8 +386,8 @@ mod tests {
     #[test]
     fn tombstoned_vectors_disappear_from_results() {
         let idx = index();
-        let a = idx.insert(&[1.0, 0.0]);
-        let b = idx.insert(&[0.9, 0.1]);
+        let a = idx.insert(&[1.0, 0.0]).unwrap();
+        let b = idx.insert(&[0.9, 0.1]).unwrap();
 
         assert!(idx.remove(a));
         assert!(!idx.remove(a), "double remove reports false");
@@ -410,7 +409,7 @@ mod tests {
         let n = if cfg!(miri) { 40 } else { 200 };
         for i in 0..n {
             let angle = i as f32 * 0.05;
-            idx.insert(&[angle.cos(), angle.sin()]);
+            idx.insert(&[angle.cos(), angle.sin()]).unwrap();
         }
 
         let inner = idx.inner.read().unwrap();
@@ -436,7 +435,7 @@ mod tests {
         let n = if cfg!(miri) { 30 } else { 100 };
         for i in 0..n {
             let angle = i as f32 * 0.1;
-            idx.insert(&[angle.cos(), angle.sin()]);
+            idx.insert(&[angle.cos(), angle.sin()]).unwrap();
         }
         let inner = idx.inner.read().unwrap();
         let entry = inner.entry.unwrap() as usize;
@@ -451,7 +450,7 @@ mod tests {
             let n = if cfg!(miri) { 15 } else { 50 };
             for i in 0..n {
                 let angle = i as f32 * 0.13;
-                idx.insert(&[angle.cos(), angle.sin()]);
+                idx.insert(&[angle.cos(), angle.sin()]).unwrap();
             }
             idx.search(&[1.0, 0.0], 10)
         };

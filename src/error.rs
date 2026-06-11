@@ -34,6 +34,14 @@ pub enum Error {
     #[error("store is at capacity ({0} memories)")]
     CapacityExceeded(usize),
 
+    /// The index's append-only storage is exhausted. Slots are never
+    /// reused, so tombstoned and replaced entries count; save and reload a
+    /// snapshot to compact.
+    #[error(
+        "index storage exhausted ({0} slots, including tombstones); compact via snapshot reload"
+    )]
+    IndexFull(usize),
+
     /// The configuration failed validation.
     #[error("invalid configuration: {0}")]
     Config(String),

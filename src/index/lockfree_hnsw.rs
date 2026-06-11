@@ -369,14 +369,14 @@ impl LockFreeHnsw {
 }
 
 impl VectorIndex for LockFreeHnsw {
-    fn insert(&self, vector: &[f32]) -> u32 {
+    fn insert(&self, vector: &[f32]) -> Option<u32> {
         let top_layer = self.random_layer();
         let id = self.nodes.push(Node {
             vector: vector.into(),
             top_layer,
             deleted: AtomicBool::new(false),
             layers: (0..=top_layer).map(|_| NeighborList::new()).collect(),
-        });
+        })?;
         // The node is in the arena but unreachable: no inbound links, not
         // the entry point. Everything below publishes it.
 
@@ -396,7 +396,7 @@ impl VectorIndex for LockFreeHnsw {
                 .is_ok()
             {
                 self.live.fetch_add(1, Ordering::AcqRel);
-                return id;
+                return Some(id);
             }
         }
 
@@ -439,7 +439,7 @@ impl VectorIndex for LockFreeHnsw {
         self.raise_entry(id, top_layer);
 
         self.live.fetch_add(1, Ordering::AcqRel);
-        id
+        Some(id)
     }
 
     fn remove(&self, id: u32) -> bool {
@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn single_vector_is_found() {
         let idx = index();
-        let id = idx.insert(&[1.0, 0.0]);
+        let id = idx.insert(&[1.0, 0.0]).unwrap();
         let results = idx.search(&[1.0, 0.0], 10);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, id);
@@ -519,9 +519,9 @@ mod tests {
     #[test]
     fn nearest_is_ranked_first() {
         let idx = index();
-        let near = idx.insert(&[1.0, 0.05]);
-        let _far = idx.insert(&[0.0, 1.0]);
-        let _mid = idx.insert(&[0.5, 0.5]);
+        let near = idx.insert(&[1.0, 0.05]).unwrap();
+        let _far = idx.insert(&[0.0, 1.0]).unwrap();
+        let _mid = idx.insert(&[0.5, 0.5]).unwrap();
 
         let results = idx.search(&[1.0, 0.0], 3);
         assert_eq!(results[0].0, near);
@@ -531,8 +531,8 @@ mod tests {
     #[test]
     fn tombstoned_vectors_disappear_from_results() {
         let idx = index();
-        let a = idx.insert(&[1.0, 0.0]);
-        let b = idx.insert(&[0.9, 0.1]);
+        let a = idx.insert(&[1.0, 0.0]).unwrap();
+        let b = idx.insert(&[0.9, 0.1]).unwrap();
 
         assert!(idx.remove(a));
         assert!(!idx.remove(a));
@@ -550,7 +550,7 @@ mod tests {
             let n = if cfg!(miri) { 15 } else { 50 };
             for i in 0..n {
                 let angle = i as f32 * 0.13;
-                idx.insert(&[angle.cos(), angle.sin()]);
+                idx.insert(&[angle.cos(), angle.sin()]).unwrap();
             }
             idx.search(&[1.0, 0.0], 10)
         };
@@ -576,7 +576,7 @@ mod tests {
                 std::thread::spawn(move || {
                     for i in 0..per_thread {
                         let angle = (t * per_thread + i) as f32 * 0.01;
-                        idx.insert(&[angle.cos(), angle.sin()]);
+                        idx.insert(&[angle.cos(), angle.sin()]).unwrap();
                     }
                 })
             })

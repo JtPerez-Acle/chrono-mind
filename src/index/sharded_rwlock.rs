@@ -58,19 +58,18 @@ impl ShardedRwLockHnsw {
         )
     }
 
-    fn join_handle(shard: usize, local: u32) -> u32 {
-        assert!(
-            local < (1 << (32 - SHARD_BITS)),
-            "shard is full: local handle space exhausted"
-        );
-        (local << SHARD_BITS) | shard as u32
+    fn join_handle(shard: usize, local: u32) -> Option<u32> {
+        if local >= (1 << (32 - SHARD_BITS)) {
+            return None; // local handle space exhausted
+        }
+        Some((local << SHARD_BITS) | shard as u32)
     }
 }
 
 impl VectorIndex for ShardedRwLockHnsw {
-    fn insert(&self, vector: &[f32]) -> u32 {
+    fn insert(&self, vector: &[f32]) -> Option<u32> {
         let shard = self.ticket.fetch_add(1, Ordering::Relaxed) % SHARDS;
-        let local = self.shards[shard].insert(vector);
+        let local = self.shards[shard].insert(vector)?;
         Self::join_handle(shard, local)
     }
 
@@ -84,7 +83,9 @@ impl VectorIndex for ShardedRwLockHnsw {
         let mut merged: Vec<(TotalF32, u32)> = Vec::with_capacity(ef * SHARDS);
         for (shard, index) in self.shards.iter().enumerate() {
             for (local, dist) in index.search(query, ef) {
-                merged.push((TotalF32(dist), Self::join_handle(shard, local)));
+                let global = Self::join_handle(shard, local)
+                    .expect("existing local handles always re-encode");
+                merged.push((TotalF32(dist), global));
             }
         }
         merged.sort();
@@ -113,7 +114,7 @@ mod tests {
         let handles: Vec<u32> = (0..n)
             .map(|i| {
                 let angle = i as f32 * 0.07;
-                idx.insert(&[angle.cos(), angle.sin()])
+                idx.insert(&[angle.cos(), angle.sin()]).unwrap()
             })
             .collect();
         assert_eq!(idx.len(), n);
@@ -133,8 +134,8 @@ mod tests {
     #[test]
     fn remove_routes_to_the_right_shard() {
         let idx = index();
-        let a = idx.insert(&[1.0, 0.0]);
-        let b = idx.insert(&[0.9, 0.1]);
+        let a = idx.insert(&[1.0, 0.0]).unwrap();
+        let b = idx.insert(&[0.9, 0.1]).unwrap();
         assert!(idx.remove(a));
         assert!(!idx.remove(a));
         assert_eq!(idx.len(), 1);

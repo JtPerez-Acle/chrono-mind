@@ -24,6 +24,12 @@ pub use lockfree_hnsw::LockFreeHnsw;
 pub use rwlock_hnsw::RwLockHnsw;
 pub use sharded_rwlock::ShardedRwLockHnsw;
 
+/// Total slot capacity of the lock-free index's arena (handles are never
+/// reused; tombstones count).
+pub fn arena_capacity() -> usize {
+    arena::Arena::<()>::CAPACITY
+}
+
 /// An `f32` wrapper with total ordering via [`f32::total_cmp`].
 ///
 /// Heap orderings over raw `f32` break down in the presence of NaN; every
@@ -51,8 +57,10 @@ impl Ord for TotalF32 {
 /// computed by the metric the index was constructed with (cosine by
 /// default: `[0.0, 2.0]`, lower is closer).
 pub trait VectorIndex: Send + Sync {
-    /// Insert a vector, returning its dense handle.
-    fn insert(&self, vector: &[f32]) -> u32;
+    /// Insert a vector, returning its dense handle, or `None` if the
+    /// index's storage is exhausted (handles are never reused, so deleted
+    /// entries count against capacity until a snapshot reload compacts).
+    fn insert(&self, vector: &[f32]) -> Option<u32>;
 
     /// Mark a handle as deleted. Tombstoned entries stop appearing in
     /// search results but still route graph traversal. Returns `false` if

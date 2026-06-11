@@ -12,9 +12,14 @@ keywords = ["vector-store", "hnsw", "temporal", "memory", "ai"]
 categories = ["data-structures", "database-implementations"]
 
 [dependencies]
+# Snapshot body integrity checksum.
+crc32fast = "1.4"
 crossbeam-epoch = "0.9"
 papaya = "0.2"
 rand = "0.8"
+# Atomic snapshot writes: write to a temp file, then persist() renames over
+# the destination (correct replace semantics on Windows too).
+tempfile = "3.8"
 thiserror = "1.0"
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }

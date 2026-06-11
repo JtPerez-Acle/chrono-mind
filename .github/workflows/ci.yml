@@ -34,6 +34,20 @@ jobs:
       - name: Benches compile
         run: cargo check --benches
 
+  # The README badge claims an MSRV; this proves it (lib + bin only — dev
+  # dependencies may legitimately need newer toolchains).
+  msrv:
+    name: MSRV 1.75
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.75"
+      - uses: Swatinem/rust-cache@v2
+      - name: Check on MSRV
+        run: cargo check
+
   # Weak-memory hardware: x86's strong ordering hides acquire/release
   # mistakes; ARM does not. The full suite — including the 16-thread
   # stress gates and recall-under-churn — must pass on aarch64.

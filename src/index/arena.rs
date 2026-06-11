@@ -107,18 +107,15 @@ impl<T> Arena<T> {
         }
     }
 
-    /// Append `value`, returning its stable handle. Lock-free: one
-    /// `fetch_add` plus at most one chunk-installation CAS race.
-    ///
-    /// # Panics
-    /// If the arena is at [`CAPACITY`](Self::CAPACITY).
-    pub fn push(&self, value: T) -> u32 {
+    /// Append `value`, returning its stable handle, or `None` if the arena
+    /// is at [`CAPACITY`](Self::CAPACITY) (slots are never reused, so
+    /// tombstoned entries count). Lock-free: one `fetch_add` plus at most
+    /// one chunk-installation CAS race.
+    pub fn push(&self, value: T) -> Option<u32> {
         let index = self.reserved.fetch_add(1, Ordering::Relaxed);
-        assert!(
-            index < Self::CAPACITY,
-            "arena is full ({} slots)",
-            Self::CAPACITY
-        );
+        if index >= Self::CAPACITY {
+            return None;
+        }
 
         let chunk = self.chunk_or_install(index / CHUNK_SIZE);
         let slot = &chunk.slots[index % CHUNK_SIZE];
@@ -128,7 +125,7 @@ impl<T> Arena<T> {
         // value until `ready` is observed `true`.
         slot.value.with_mut(|p| unsafe { (*p).write(value) });
         slot.ready.store(true, Ordering::Release);
-        index as u32
+        Some(index as u32)
     }
 
     /// Read the value at `handle`, or `None` if the handle was never
@@ -224,8 +221,8 @@ mod tests {
     #[test]
     fn push_then_get_roundtrips() {
         let arena: Arena<String> = Arena::new();
-        let a = arena.push("alpha".into());
-        let b = arena.push("beta".into());
+        let a = arena.push("alpha".into()).unwrap();
+        let b = arena.push("beta".into()).unwrap();
         assert_eq!(arena.get(a).unwrap(), "alpha");
         assert_eq!(arena.get(b).unwrap(), "beta");
         assert_eq!(arena.len(), 2);
@@ -247,7 +244,7 @@ mod tests {
             CHUNK_SIZE * 2 + 3
         };
         for i in 0..n {
-            assert_eq!(arena.push(i), i as u32);
+            assert_eq!(arena.push(i), Some(i as u32));
         }
         for i in 0..n {
             assert_eq!(*arena.get(i as u32).unwrap(), i);
@@ -266,7 +263,7 @@ mod tests {
         let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let arena: Arena<Counted> = Arena::new();
         for _ in 0..10 {
-            arena.push(Counted(Arc::clone(&drops)));
+            arena.push(Counted(Arc::clone(&drops))).unwrap();
         }
         drop(arena);
         assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 10);
@@ -285,7 +282,7 @@ mod tests {
                 let arena = Arc::clone(&arena);
                 std::thread::spawn(move || {
                     (0..per_thread)
-                        .map(|i| (arena.push((t, i)), (t, i)))
+                        .map(|i| (arena.push((t, i)).unwrap(), (t, i)))
                         .collect::<Vec<_>>()
                 })
             })
@@ -318,11 +315,11 @@ mod loom_tests {
 
             let a = {
                 let arena = Arc::clone(&arena);
-                thread::spawn(move || arena.push(1))
+                thread::spawn(move || arena.push(1).unwrap())
             };
             let b = {
                 let arena = Arc::clone(&arena);
-                thread::spawn(move || arena.push(2))
+                thread::spawn(move || arena.push(2).unwrap())
             };
             let ha = a.join().unwrap();
             let hb = b.join().unwrap();
@@ -341,7 +338,7 @@ mod loom_tests {
             let writer = {
                 let arena = Arc::clone(&arena);
                 thread::spawn(move || {
-                    arena.push(0xFEED);
+                    arena.push(0xFEED).unwrap();
                 })
             };
             // Race a read against the push: it must observe either absence
@@ -361,15 +358,15 @@ mod loom_tests {
             // CHUNK_SIZE is 2 under loom: two threads pushing two values
             // each forces a race on installing the second chunk.
             let arena: Arc<Arena<usize>> = Arc::new(Arena::new());
-            arena.push(100); // occupy slot 0
+            arena.push(100).unwrap(); // occupy slot 0
 
             let a = {
                 let arena = Arc::clone(&arena);
-                thread::spawn(move || (arena.push(1), arena.push(2)))
+                thread::spawn(move || (arena.push(1).unwrap(), arena.push(2).unwrap()))
             };
             let b = {
                 let arena = Arc::clone(&arena);
-                thread::spawn(move || (arena.push(3), arena.push(4)))
+                thread::spawn(move || (arena.push(3).unwrap(), arena.push(4).unwrap()))
             };
             let (a1, a2) = a.join().unwrap();
             let (b1, b2) = b.join().unwrap();

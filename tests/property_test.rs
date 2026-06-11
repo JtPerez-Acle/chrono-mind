@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use chronomind::config::IndexParams;
 use chronomind::index::{LockFreeHnsw, RwLockHnsw, VectorIndex};
-use chronomind::metric::CosineDistance;
+use chronomind::metric::{CosineDistance, DistanceMetric};
 
 use proptest::collection::vec as pvec;
 use proptest::prelude::*;
@@ -33,7 +33,7 @@ proptest! {
             7,
         );
         for v in &vectors {
-            index.insert(v);
+            index.insert(v).unwrap();
         }
         for v in &vectors {
             let results = index.search(v, 10);
@@ -64,7 +64,7 @@ proptest! {
 
         for (i, (kind, v)) in ops.iter().enumerate() {
             match kind {
-                0 => handles.push(index.insert(v)),
+                0 => handles.push(index.insert(v).unwrap()),
                 1 => {
                     // Remove a deterministic-but-arbitrary previous insert.
                     if let Some(&h) = handles.get(i % handles.len().max(1)) {
@@ -137,6 +137,92 @@ proptest! {
         prop_assert_eq!(stats.total_memories, store.len(), "stats drifted from len");
     }
 
+    /// Differential oracle: in the exhaustive regime (`ef` covering every
+    /// live vector), HNSW search is exact — so both index implementations,
+    /// run through an arbitrary insert/remove sequence, must agree
+    /// *perfectly* with a brute-force linear-scan model: same ids, same
+    /// order, same distances. Catches lost inserts, ghost tombstones,
+    /// distance corruption, and graph disconnection in either impl.
+    #[test]
+    fn both_indexes_match_the_linear_scan_model_exactly(
+        ops in pvec((0u8..=1, arb_vector()), 1..48),
+        queries in pvec(arb_vector(), 1..4),
+    ) {
+        let metric = CosineDistance::new();
+        let params = IndexParams::default();
+        let indexes: [Box<dyn VectorIndex>; 2] = [
+            Box::new(LockFreeHnsw::with_seed(
+                params.clone(), Arc::new(CosineDistance::new()), 31,
+            )),
+            Box::new(RwLockHnsw::with_seed(
+                params, Arc::new(CosineDistance::new()), 37,
+            )),
+        ];
+        // Model: handle = insertion order (true for both impls), bool = live.
+        let mut model: Vec<(Vec<f32>, bool)> = Vec::new();
+
+        for (i, (kind, v)) in ops.iter().enumerate() {
+            match kind {
+                0 => {
+                    for index in &indexes {
+                        prop_assert_eq!(
+                            index.insert(v),
+                            Some(model.len() as u32),
+                            "handles must follow insertion order"
+                        );
+                    }
+                    model.push((v.clone(), true));
+                }
+                _ => {
+                    if !model.is_empty() {
+                        let pick = i % model.len();
+                        let expect_removed = model[pick].1;
+                        for index in &indexes {
+                            prop_assert_eq!(index.remove(pick as u32), expect_removed);
+                        }
+                        model[pick].1 = false;
+                    }
+                }
+            }
+        }
+
+        let live: Vec<(u32, &Vec<f32>)> = model
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, alive))| *alive)
+            .map(|(h, (v, _))| (h as u32, v))
+            .collect();
+
+        for q in &queries {
+            let mut expected: Vec<(f32, u32)> = live
+                .iter()
+                .map(|(h, v)| (metric.distance(v, q), *h))
+                .collect();
+            expected.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+            for (which, index) in indexes.iter().enumerate() {
+                let got = index.search(q, model.len() + 8); // exhaustive ef
+                prop_assert_eq!(
+                    got.len(), expected.len(),
+                    "impl {} returned {} of {} live vectors",
+                    which, got.len(), expected.len()
+                );
+                for ((got_id, got_dist), (want_dist, want_id)) in
+                    got.iter().zip(&expected)
+                {
+                    prop_assert_eq!(
+                        got_id, want_id,
+                        "impl {} ranking diverged from linear scan", which
+                    );
+                    prop_assert!(
+                        (got_dist - want_dist).abs() < 1e-6,
+                        "impl {which} distance {got_dist} vs model {want_dist}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Results are sorted ascending by distance and contain no duplicate ids.
     #[test]
     fn results_are_sorted_and_unique(vectors in pvec(arb_vector(), 1..50)) {
@@ -146,7 +232,7 @@ proptest! {
             11,
         );
         for v in &vectors {
-            index.insert(v);
+            index.insert(v).unwrap();
         }
         let query = &vectors[0];
         let results = index.search(query, 20);

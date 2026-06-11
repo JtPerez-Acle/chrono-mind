@@ -249,7 +249,10 @@ impl ChronoMind {
                 .truncate(self.config.max_relationships);
         }
 
-        let handle = self.index.insert(&memory.vector.data);
+        let handle = self
+            .index
+            .insert(&memory.vector.data)
+            .ok_or(Error::IndexFull(crate::index::arena_capacity()))?;
         let stored = StoredMemory::from_memory(&memory, handle);
         self.by_handle.pin().insert(handle, Arc::clone(&stored));
         if let Some(replaced) = map.insert(memory.vector.id.clone(), stored) {
