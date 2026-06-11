@@ -1,6 +1,9 @@
 # ChronoMind v0.2 Design Document
 
-**Status:** Approved for implementation
+**Status:** Implemented (June 2026). All six milestones landed; gates met.
+This document is preserved as the design record — §1–§8 describe the plan as
+approved, Appendix B records where execution deviated and why, Appendix A
+records the audit of the pre-0.2 codebase that motivated the rework.
 **Goal:** Transform ChronoMind into a portfolio-grade showcase of production Rust: a temporal
 vector store whose headline claim — *lock-free concurrent HNSW* — is actually true, verifiable,
 and benchmarked against its own locked baseline.
@@ -292,6 +295,13 @@ Rules for autonomous execution:
    distances, which Miri's deliberate floating-point jitter breaks — they now
    assert ranking identity (the property that matters) and bit-exactness only
    natively.
+
+0a. **§6 benchmark details (M5).** The `recall_curve` bench became an ignored
+   diagnostic test (`diagnose_uniform_768_ef_curve`) rather than a criterion
+   target — recall is a correctness property with hard gates in
+   `tests/recall_test.rs`, not a timing measurement. Bench sizes were reduced
+   from the §6 sketch (N=50k → 4k–10k) to keep the suite minutes-scale; the
+   A/B scaling signal is size-stable. README shows tables, not plots.
 
 0b. **§8 commit granularity (M3/M4).** Milestones 3 and 4 land as one commit:
    the store rework proceeded while the (slow, Windows-hostile) Miri gate for
