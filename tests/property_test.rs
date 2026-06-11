@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use chronomind::config::IndexParams;
-use chronomind::index::{RwLockHnsw, VectorIndex};
+use chronomind::index::{LockFreeHnsw, RwLockHnsw, VectorIndex};
 use chronomind::metric::CosineDistance;
 
 use proptest::collection::vec as pvec;
@@ -44,6 +44,97 @@ proptest! {
                 results[0].1
             );
         }
+    }
+
+    /// Arbitrary interleaved op sequences preserve every structural graph
+    /// invariant — the invariant sweep is the oracle, the op sequence is
+    /// the fuzz input. (The coverage-guided version of this same harness
+    /// lives in fuzz/fuzz_targets/index_ops.rs.)
+    #[test]
+    fn arbitrary_op_sequences_preserve_index_invariants(
+        ops in pvec((0u8..=2, arb_vector()), 1..120)
+    ) {
+        let index = LockFreeHnsw::with_seed(
+            IndexParams::default(),
+            Arc::new(CosineDistance::new()),
+            23,
+        );
+        let mut handles: Vec<u32> = Vec::new();
+        let mut removed = 0usize;
+
+        for (i, (kind, v)) in ops.iter().enumerate() {
+            match kind {
+                0 => handles.push(index.insert(v)),
+                1 => {
+                    // Remove a deterministic-but-arbitrary previous insert.
+                    if let Some(&h) = handles.get(i % handles.len().max(1)) {
+                        if index.remove(h) {
+                            removed += 1;
+                        }
+                    }
+                }
+                _ => {
+                    let results = index.search(v, 16);
+                    prop_assert!(
+                        results.windows(2).all(|w| w[0].1 <= w[1].1),
+                        "unsorted results mid-sequence"
+                    );
+                }
+            }
+        }
+
+        prop_assert_eq!(index.len(), handles.len() - removed, "live count drifted");
+        index.check_invariants().map_err(|e| {
+            proptest::test_runner::TestCaseError::fail(format!("invariants: {e}"))
+        })?;
+    }
+
+    /// Arbitrary op sequences against the full store API — including
+    /// `consolidate` at quiesce points (single-threaded ownership here, the
+    /// legal pattern) — keep the store coherent.
+    #[test]
+    fn arbitrary_op_sequences_keep_the_store_coherent(
+        ops in pvec((0u8..=5, arb_vector()), 1..80)
+    ) {
+        let mut store = chronomind::ChronoMind::new(
+            chronomind::Config::builder().dimensions(DIM).build().unwrap(),
+        ).unwrap();
+        let mut next_id = 0usize;
+
+        for (i, (kind, v)) in ops.iter().enumerate() {
+            match kind {
+                0 | 1 => {
+                    let memory = chronomind::Memory::from_vector(
+                        chronomind::Vector::new(format!("m{next_id}"), v.clone()),
+                    );
+                    store.insert(memory).unwrap();
+                    next_id += 1;
+                }
+                2 => {
+                    if next_id > 0 {
+                        store.remove(&format!("m{}", i % next_id));
+                    }
+                }
+                3 => {
+                    if next_id > 0 {
+                        store.access(&format!("m{}", i % next_id));
+                    }
+                }
+                4 => store.apply_decay(),
+                _ => {
+                    store.consolidate(); // quiesce point: we own the store
+                }
+            }
+            let results = store.search(v, 5).unwrap();
+            prop_assert!(results.len() <= 5);
+            prop_assert!(
+                results.windows(2).all(|w| w[0].1 <= w[1].1),
+                "unsorted store results"
+            );
+        }
+
+        let stats = store.stats();
+        prop_assert_eq!(stats.total_memories, store.len(), "stats drifted from len");
     }
 
     /// Results are sorted ascending by distance and contain no duplicate ids.

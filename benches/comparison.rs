@@ -1,4 +1,4 @@
-//! A/B benchmarks: lock-free HNSW vs the RwLock baseline.
+﻿//! A/B benchmarks: lock-free HNSW vs the RwLock baseline.
 //!
 //! Run with `cargo bench`. Three workloads, each across 1/2/4/8 threads:
 //!
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use chronomind::config::IndexParams;
-use chronomind::index::{LockFreeHnsw, RwLockHnsw, VectorIndex};
+use chronomind::index::{LockFreeHnsw, RwLockHnsw, ShardedRwLockHnsw, VectorIndex};
 use chronomind::metric::CosineDistance;
 
 use rand::rngs::StdRng;
@@ -49,13 +49,19 @@ fn params() -> IndexParams {
 enum Impl {
     LockFree,
     Baseline,
+    /// 16-shard hash-routed RwLock baseline — the version a practitioner
+    /// would actually deploy; see `index::sharded_rwlock`.
+    Sharded,
 }
+
+const IMPLS: [Impl; 3] = [Impl::LockFree, Impl::Baseline, Impl::Sharded];
 
 impl Impl {
     fn name(self) -> &'static str {
         match self {
             Impl::LockFree => "lockfree",
             Impl::Baseline => "rwlock",
+            Impl::Sharded => "sharded16",
         }
     }
 
@@ -64,6 +70,7 @@ impl Impl {
         match self {
             Impl::LockFree => Arc::new(LockFreeHnsw::with_seed(params(), metric, SEED)),
             Impl::Baseline => Arc::new(RwLockHnsw::with_seed(params(), metric, SEED)),
+            Impl::Sharded => Arc::new(ShardedRwLockHnsw::with_seed(params(), metric, SEED)),
         }
     }
 }
@@ -125,7 +132,7 @@ fn insert_throughput(c: &mut Criterion) {
     group.sample_size(10);
     group.throughput(criterion::Throughput::Elements(INSERT_N as u64));
 
-    for which in [Impl::LockFree, Impl::Baseline] {
+    for which in IMPLS {
         for threads in THREAD_COUNTS {
             group.bench_with_input(
                 BenchmarkId::new(which.name(), threads),
@@ -156,7 +163,7 @@ fn search_qps(c: &mut Criterion) {
     group.sample_size(10);
     group.throughput(criterion::Throughput::Elements(SEARCH_OPS as u64));
 
-    for which in [Impl::LockFree, Impl::Baseline] {
+    for which in IMPLS {
         let index = which.build();
         for v in &corpus {
             index.insert(v);
@@ -192,7 +199,7 @@ fn mixed_90_10(c: &mut Criterion) {
     group.throughput(criterion::Throughput::Elements(MIXED_OPS as u64));
 
     let indexed: Vec<(usize, &Vec<f32>)> = stream.iter().enumerate().collect();
-    for which in [Impl::LockFree, Impl::Baseline] {
+    for which in IMPLS {
         for threads in THREAD_COUNTS {
             // One pre-built index per configuration. Inserted vectors
             // accumulate across that configuration's samples (bounded

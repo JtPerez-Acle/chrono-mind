@@ -1,4 +1,4 @@
-//! Copy-on-write neighbor lists with epoch-based reclamation.
+﻿//! Copy-on-write neighbor lists with epoch-based reclamation.
 //!
 //! This is the concurrency primitive at the heart of the lock-free index.
 //! Each (node, layer) pair owns a [`NeighborList`]: an atomic pointer to an
@@ -15,9 +15,9 @@
 //!   is destroyed only after every thread that could have observed it has
 //!   unpinned, so readers never dereference freed memory.
 //!
-//! The CAS protocol (load → copy-modify → compare_exchange → retry) is
+//! The CAS protocol (load â†’ copy-modify â†’ compare_exchange â†’ retry) is
 //! verified under loom in `tests/loom.rs` against lost-update and
-//! torn-read failures; see `docs/DESIGN.md` §5 for what loom does and does
+//! torn-read failures; see `docs/DESIGN.md` Â§5 for what loom does and does
 //! not cover.
 
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
@@ -29,13 +29,13 @@ struct Slice {
 }
 
 /// An atomically replaceable, immutable list of neighbor ids.
-pub(crate) struct NeighborList {
+pub struct NeighborList {
     head: Atomic<Slice>,
 }
 
 impl NeighborList {
     /// An empty list.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             head: Atomic::null(),
         }
@@ -45,7 +45,7 @@ impl NeighborList {
     ///
     /// The returned slice borrows the guard: it stays valid for as long as
     /// the epoch is pinned, even if writers replace the list concurrently.
-    pub(crate) fn load<'g>(&self, guard: &'g Guard) -> &'g [u32] {
+    pub fn load<'g>(&self, guard: &'g Guard) -> &'g [u32] {
         let shared = self.head.load(Ordering::Acquire, guard);
         // SAFETY: a non-null pointer in `head` always references a `Slice`
         // published by `update`/`store`; epoch pinning (the guard) keeps it
@@ -61,7 +61,7 @@ impl NeighborList {
     /// Last-write-wins: concurrent `update`s may be overwritten. Use only
     /// where exclusivity is structural (e.g. initializing a node before
     /// its handle is published to the graph).
-    pub(crate) fn store(&self, ids: Vec<u32>, guard: &Guard) {
+    pub fn store(&self, ids: Vec<u32>, guard: &Guard) {
         let new = Owned::new(Slice { ids: ids.into() });
         let old = self.head.swap(new, Ordering::AcqRel, guard);
         if !old.is_null() {
@@ -79,7 +79,7 @@ impl NeighborList {
     /// to leave the list unchanged (the loop exits without writing).
     /// On CAS failure `f` runs again over the fresh value — it must be
     /// idempotent in intent (e.g. "ensure id X is present"), not effectful.
-    pub(crate) fn update(&self, guard: &Guard, mut f: impl FnMut(&[u32]) -> Option<Vec<u32>>) {
+    pub fn update(&self, guard: &Guard, mut f: impl FnMut(&[u32]) -> Option<Vec<u32>>) {
         loop {
             let current = self.head.load(Ordering::Acquire, guard);
             // SAFETY: as in `load` — pinned epoch keeps `current` alive.
@@ -118,6 +118,12 @@ impl NeighborList {
                 }
             }
         }
+    }
+}
+
+impl Default for NeighborList {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

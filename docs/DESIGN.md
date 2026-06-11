@@ -324,6 +324,37 @@ Rules for autonomous execution:
    - The Algorithm 4 neighbor-selection heuristic (`select_neighbors`) was promoted
      from stretch goal to implemented, in both insert selection and pruning.
 
+## Appendix C — External review response (June 2026)
+
+Seven review comments received after the v0.2 milestones landed; all
+adopted:
+
+1. **`consolidate(&mut self)` vs `Arc` tension** → the quiesce contract
+   (join workers → `Arc::try_unwrap` → consolidate → reshare) is now an
+   executable doctest on the method, and the README design notes state it.
+2. **Weak-memory hardware** → `arm` CI job (`ubuntu-24.04-arm`) runs the
+   full suite, including the stress and churn gates, on aarch64.
+3. **ThreadSanitizer** → `tsan` CI job runs the stress suite under
+   `-Zsanitizer=thread` with `-Zbuild-std`. Suppressions
+   (`ci/tsan-suppressions.txt`) cover only crossbeam-epoch's fence-based
+   synchronization, which TSan cannot model; our code is unsuppressed.
+4. **Recall under concurrent mutation** → new gate
+   (`recall_holds_during_concurrent_churn`): queries race four live
+   writer threads; recall filtered to pre-churn ground truth must hold
+   ≥ 0.90 *while* writers are active, plus a post-churn invariant sweep.
+5. **Reclamation actually reclaims** → `tests/reclamation_test.rs`
+   installs a counting global allocator: 1M churned COW slices must
+   plateau (< 16 MB in flight, < 1 MB after drop); the pinned-guard
+   pathology is demonstrated and asserted (growth while pinned, drain
+   after release) and documented in the README known-limits.
+6. **Fairer baseline** → `ShardedRwLockHnsw` (16 shards, round-robin):
+   added to the bench suite as `sharded16`; results in
+   `docs/BENCHMARKS.md`.
+7. **Fuzzing with the invariant oracle** → two proptest op-sequence
+   harnesses (index-level and store-level including consolidate at
+   quiesce points) run in the normal suite; a coverage-guided cargo-fuzz
+   target (`fuzz/fuzz_targets/index_ops.rs`) runs a 90-second smoke in CI.
+
 ## Appendix A — Verified findings this design responds to (June 2026 audit)
 
 1. `MemoryStorage` (the real API) uses the `hnsw_rs` crate; the in-house `TemporalHNSW` is

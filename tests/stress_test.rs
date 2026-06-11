@@ -174,6 +174,103 @@ fn lockfree_index_survives_16_thread_hammering() {
     );
 }
 
+/// Recall under live mutation: queries race concurrent inserts and must
+/// still find the pre-churn ground truth.
+///
+/// The publish protocol guarantees readers see only fully formed graph
+/// states; this gate checks the stronger property that mid-churn search
+/// *quality* holds — a reader observing the graph between a writer's
+/// backlink CASes still reaches the true neighbors. Ground truth is the
+/// brute-force top-10 over the pre-churn corpus; results are filtered to
+/// pre-churn handles (churn vectors may legitimately be nearer) and the
+/// filtered recall must stay ≥ 0.90 while writers are actively inserting.
+#[test]
+fn recall_holds_during_concurrent_churn() {
+    const BASE: usize = 2_000;
+    const CHURN_PER_THREAD: usize = 1_500;
+    const WRITERS: usize = 4;
+    const K: usize = 10;
+
+    let index = Arc::new(LockFreeHnsw::with_seed(
+        IndexParams::default(),
+        Arc::new(CosineDistance::new()),
+        0xC4A2,
+    ));
+
+    let mut rng = StdRng::seed_from_u64(0xC4A2);
+    let base: Vec<Vec<f32>> = (0..BASE).map(|_| unit_vector(&mut rng, DIM)).collect();
+    for v in &base {
+        index.insert(v); // handles 0..BASE, single-threaded
+    }
+
+    // Ground truth against the quiescent pre-churn corpus.
+    let metric = CosineDistance::new();
+    let queries: Vec<Vec<f32>> = (0..40).map(|_| unit_vector(&mut rng, DIM)).collect();
+    let ground_truth: Vec<Vec<u32>> = queries
+        .iter()
+        .map(|q| {
+            let mut scored: Vec<(f32, u32)> = base
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (metric.distance(v, q), i as u32))
+                .collect();
+            scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+            scored.into_iter().take(K).map(|(_, id)| id).collect()
+        })
+        .collect();
+
+    let done = Arc::new(AtomicUsize::new(0));
+    let (during_recall, during_queries) = std::thread::scope(|s| {
+        for t in 0..WRITERS {
+            let index = Arc::clone(&index);
+            let done = Arc::clone(&done);
+            s.spawn(move || {
+                let mut rng = StdRng::seed_from_u64(0xC4A2 + 1 + t as u64);
+                for _ in 0..CHURN_PER_THREAD {
+                    index.insert(&unit_vector(&mut rng, DIM));
+                }
+                done.fetch_add(1, Ordering::Release);
+            });
+        }
+
+        // Query continuously while writers are live; only rounds that ran
+        // with at least one writer still active count toward the gate.
+        let mut total = 0.0;
+        let mut rounds = 0usize;
+        while done.load(Ordering::Acquire) < WRITERS {
+            for (q, truth) in queries.iter().zip(&ground_truth) {
+                let got: Vec<u32> = index
+                    .search(q, 100)
+                    .into_iter()
+                    .filter(|&(id, _)| (id as usize) < BASE) // pre-churn only
+                    .take(K)
+                    .map(|(id, _)| id)
+                    .collect();
+                let hits = truth.iter().filter(|e| got.contains(e)).count();
+                total += hits as f64 / K as f64;
+                rounds += 1;
+            }
+        }
+        (total / rounds.max(1) as f64, rounds)
+    });
+
+    assert!(
+        during_queries >= 40,
+        "churn finished before queries could race it ({during_queries} rounds); \
+         raise CHURN_PER_THREAD"
+    );
+    assert!(
+        during_recall >= 0.90,
+        "mid-churn recall@{K} = {during_recall:.3} below the 0.90 gate \
+         ({during_queries} racing queries)"
+    );
+
+    // And the graph survived the churn structurally.
+    index
+        .check_invariants()
+        .expect("post-churn invariants violated");
+}
+
 /// The full store under concurrent mixed load: inserts, searches, access
 /// bumps, decay sweeps, and removes from 16 threads at once, all through
 /// the public `&self` API.

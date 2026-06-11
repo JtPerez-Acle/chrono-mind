@@ -1,4 +1,4 @@
-//! A lock-free, chunked, append-only arena.
+﻿//! A lock-free, chunked, append-only arena.
 //!
 //! Nodes are allocated by bumping an atomic counter and never move or get
 //! freed while the arena lives — which is what makes wait-free reads
@@ -79,7 +79,7 @@ impl<T> Chunk<T> {
 }
 
 /// The arena. See the module docs.
-pub(crate) struct Arena<T> {
+pub struct Arena<T> {
     /// Directory of lazily allocated chunks.
     chunks: Box<[AtomicPtr<Chunk<T>>]>,
     /// Number of slots ever reserved (a bound, not a publication marker —
@@ -98,9 +98,9 @@ unsafe impl<T: Send + Sync> Sync for Arena<T> {}
 
 impl<T> Arena<T> {
     /// Total slot capacity.
-    pub(crate) const CAPACITY: usize = CHUNK_SIZE * MAX_CHUNKS;
+    pub const CAPACITY: usize = CHUNK_SIZE * MAX_CHUNKS;
 
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             chunks: (0..MAX_CHUNKS).map(|_| AtomicPtr::default()).collect(),
             reserved: AtomicUsize::new(0),
@@ -112,7 +112,7 @@ impl<T> Arena<T> {
     ///
     /// # Panics
     /// If the arena is at [`CAPACITY`](Self::CAPACITY).
-    pub(crate) fn push(&self, value: T) -> u32 {
+    pub fn push(&self, value: T) -> u32 {
         let index = self.reserved.fetch_add(1, Ordering::Relaxed);
         assert!(
             index < Self::CAPACITY,
@@ -134,7 +134,7 @@ impl<T> Arena<T> {
     /// Read the value at `handle`, or `None` if the handle was never
     /// returned by [`push`](Self::push) or its write has not been published
     /// to this thread yet. Wait-free.
-    pub(crate) fn get(&self, handle: u32) -> Option<&T> {
+    pub fn get(&self, handle: u32) -> Option<&T> {
         let index = handle as usize;
         if index >= Self::CAPACITY {
             return None;
@@ -157,8 +157,13 @@ impl<T> Arena<T> {
 
     /// Number of slots reserved so far. Handles `0..len()` may still be
     /// momentarily unpublished; [`get`](Self::get) is the authority.
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.reserved.load(Ordering::Acquire).min(Self::CAPACITY)
+    }
+
+    /// Whether no slot has ever been reserved.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     fn chunk_or_install(&self, chunk_index: usize) -> &Chunk<T> {
@@ -181,6 +186,12 @@ impl<T> Arena<T> {
                 unsafe { &*winner }
             }
         }
+    }
+}
+
+impl<T> Default for Arena<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

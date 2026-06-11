@@ -87,6 +87,11 @@ Claims about concurrent code are cheap; ChronoMind ships its receipts:
 | **Recall gates** | recall@10 ≥ 0.95 vs brute force on embedding-like data (768-d, low intrinsic dimension) and 32-d uniform data — for the lock-free index *and* the locked baseline it's compared against |
 | **Connectivity gate** | Uniform 768-d data at ef=200 still reaches ≥ 0.95: a failure here means broken graph construction, not hard data |
 | **16-thread stress** | 104k mixed ops (75% search / 20% insert / 5% delete), then a full structural invariant sweep (no dangling handles, no duplicate links, no cap violations) and recall ≥ 0.90 over survivors |
+| **Recall under churn** | Queries racing live concurrent inserts must keep recall ≥ 0.90 against pre-churn ground truth — search *quality* mid-mutation, not just memory safety |
+| **Reclamation gates** | A counting global allocator proves epoch garbage is actually freed (1M churned slices plateau under 16 MB in flight) — and measures the known pathology: a guard pinned forever blocks reclamation until released |
+| **Op-sequence fuzzing** | proptest drives arbitrary insert/remove/search/consolidate sequences with the structural invariant sweep as the oracle; a coverage-guided cargo-fuzz target runs the same harness in CI |
+| **ThreadSanitizer** | The stress suite under TSan on real scheduling — the complement to loom's models (suppressions cover only crossbeam-epoch's fence-based sync, never our code) |
+| **ARM (weak memory)** | The full suite on aarch64 Linux in CI — x86's strong ordering can mask acquire/release mistakes; ARM hardware cannot |
 | **CI** | All of the above on every push, Windows and Linux |
 
 Run them yourself:
@@ -97,13 +102,16 @@ RUSTFLAGS="--cfg loom" cargo test --test loom --release   # exhaustive interleav
 cargo +nightly miri test --lib index                # UB detection
 ```
 
-## The baseline ships too
+## The baselines ship too
 
 `src/index/rwlock_hnsw.rs` is the same HNSW algorithm behind a single
 `RwLock` — deliberately kept, always compiled. It is the correctness
 reference the lock-free index is tested against, and the A/B baseline for
-the benchmarks. If you distrust the fancy version, use `RwLockHnsw`; both
-implement the same `VectorIndex` trait.
+the benchmarks. And because a single RwLock is the baseline everyone
+beats, `src/index/sharded_rwlock.rs` adds the *fair* competitor: 16
+independently locked shards with round-robin routing — the design a
+practitioner would actually deploy. All three implement the same
+`VectorIndex` trait; pick whichever you trust.
 
 ## Benchmarks
 
@@ -112,38 +120,57 @@ implement the same `VectorIndex` trait.
 `search_qps`, and `mixed_90_10` (90% search / 10% insert).
 
 Measured on an i7-12700KF (12 cores), Windows 11, Rust stable, 768-d
-embedding-like data, M=16 / efC=100 / efS=50. Ops/sec, criterion
-mid-estimates:
+embedding-like data, M=16 / efC=100 / efS=50. Three contenders: the
+lock-free index, a single RwLock, and the fair competitor — 16
+independently locked shards (`sharded16`). Ops/sec, criterion
+mid-estimates from one coherent run:
 
-**Concurrent inserts** (the workload locks ruin):
+**Concurrent inserts:**
 
-| threads | lock-free | RwLock | speedup |
-|--------:|----------:|-------:|--------:|
-| 1 | 3,116 | 3,352 | 0.93× |
-| 2 | 6,415 | 3,303 | 1.94× |
-| 4 | 12,573 | 3,280 | **3.83×** |
-| 8 | 21,313 | 3,277 | **6.50×** |
+| threads | lock-free | RwLock | sharded16 |
+|--------:|----------:|-------:|----------:|
+| 1 | 2,471 | 2,498 | **7,984** |
+| 2 | 4,538 | 2,751 | **14,220** |
+| 4 | 9,488 | 2,775 | **23,262** |
+| 8 | 18,639 | 2,853 | **44,913** |
 
-The lock-free index scales near-linearly; the RwLock baseline is *flat* —
-adding threads to serialized writes buys nothing.
+Honest verdict: **sharding wins pure construction** — each insert searches
+a graph 1/16th the size, and writers rarely collide across 16 locks. The
+single RwLock is flat; the lock-free index scales near-linearly (7.5×
+self-scaling) but pays full-graph construction cost per insert.
+
+**Pure search, zero writers:**
+
+| threads | lock-free | RwLock | sharded16 |
+|--------:|----------:|-------:|----------:|
+| 1 | 3,618 | 3,642 | 393 |
+| 2 | 6,806 | 7,396 | 905 |
+| 4 | 13,262 | 14,478 | 1,665 |
+| 8 | **26,256** | **27,050** | 3,506 |
+
+Sharding's bill comes due: every query pays 16 sub-searches plus a merge —
+**~9× slower** at every thread count. The uncontended RwLock keeps a small
+constant edge over lock-free (epoch pinning is not free); that is the
+honest cost of wait-free reads.
 
 **Mixed 90% search / 10% insert** (the realistic agent-memory workload):
 
-| threads | lock-free | RwLock | speedup |
-|--------:|----------:|-------:|--------:|
-| 1 | 23,619 | 27,296 | 0.87× |
-| 2 | 50,165 | 25,844 | 1.94× |
-| 4 | 90,918 | 26,080 | **3.49×** |
-| 8 | 139,150 | 32,454 | **4.29×** |
+| threads | lock-free | RwLock | sharded16 |
+|--------:|----------:|-------:|----------:|
+| 1 | 16,039 | 22,106 | 529 |
+| 2 | 38,337 | 20,335 | 1,120 |
+| 4 | 66,440 | 16,298 | 2,110 |
+| 8 | **114,570** | 22,621 | 5,204 |
 
-Ten percent writers is enough for the lock to throttle every reader.
+The workload that matters, and the only one with a single winner: the
+lock-free index beats the flat RwLock **5×** and the sharded design **22×**
+at 8 threads. Sharding's read tax devours its write advantage the moment
+searches dominate; the RwLock throttles everyone once 10% of traffic
+writes.
 
-**Pure search, zero writers**: the RwLock baseline is ~5% *faster* at every
-thread count (uncontended read locks are cheap; epoch pinning is not free).
-That is the honest cost of the lock-free design — you pay a small constant
-read overhead to make writes scale and to guarantee readers never block.
-Numbers vary with hardware; the scaling shapes are the durable signal.
-Full method and tables: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Numbers vary with hardware and run-to-run (~±15% between sessions); the
+scaling *shapes* and order-of-magnitude gaps are the durable signal. Full
+method and analysis: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## The temporal model
 
@@ -186,6 +213,11 @@ the index is rebuilt on load.
 - **Why does `consolidate` take `&mut self`?** It is an O(n²) maintenance
   pass. Exclusive access keeps its pairwise bookkeeping trivially correct;
   that is an API decision made visible in the signature, not a hidden lock.
+  The contract for shared stores is **quiesce → `Arc::try_unwrap` (or
+  `Arc::get_mut`) → consolidate → reshare**, and the doctest on
+  `ChronoMind::consolidate` shows the exact legal calling pattern — the
+  compiler rejecting `consolidate` through a live `Arc` is the contract
+  being enforced, not an oversight.
 - **Where are the `unsafe` blocks?** All in `src/index/arena.rs` and
   `src/index/neighbors.rs`, each with a `// SAFETY:` comment stating its
   invariant, all covered by loom + Miri. The rest of the crate is safe
@@ -194,6 +226,13 @@ the index is rebuilt on load.
   capacity check is approximate under concurrent insertion (bounded
   overshoot); concurrent inserts cannot link to each other (standard for
   concurrent HNSW construction — covered by the stress recall gate).
+  And epoch reclamation's classic weakness applies: **a guard pinned
+  indefinitely blocks garbage collection**, so deferred slices accumulate
+  without bound until it unpins. This is measured behavior, not theory —
+  `tests/reclamation_test.rs` pins a hostage guard, watches garbage grow
+  past 4 MB, releases it, and watches the pile drain. Guards in this
+  crate live for the duration of one operation, so the pathology requires
+  misusing the hidden primitive API directly.
 
 Full architecture and milestone history: [docs/DESIGN.md](docs/DESIGN.md).
 

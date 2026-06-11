@@ -9,13 +9,20 @@
 //! store maintains the mapping between caller-facing string ids and index
 //! handles.
 
-pub(crate) mod arena;
+// The primitives are public-but-hidden: not part of the stable API, but
+// reachable by the reclamation tests and fuzz targets, which need to drive
+// them directly.
+#[doc(hidden)]
+pub mod arena;
 mod lockfree_hnsw;
-pub(crate) mod neighbors;
+#[doc(hidden)]
+pub mod neighbors;
 mod rwlock_hnsw;
+mod sharded_rwlock;
 
 pub use lockfree_hnsw::LockFreeHnsw;
 pub use rwlock_hnsw::RwLockHnsw;
+pub use sharded_rwlock::ShardedRwLockHnsw;
 
 /// An `f32` wrapper with total ordering via [`f32::total_cmp`].
 ///

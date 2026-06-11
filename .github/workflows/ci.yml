@@ -34,6 +34,56 @@ jobs:
       - name: Benches compile
         run: cargo check --benches
 
+  # Weak-memory hardware: x86's strong ordering hides acquire/release
+  # mistakes; ARM does not. The full suite — including the 16-thread
+  # stress gates and recall-under-churn — must pass on aarch64.
+  arm:
+    name: test (ARM linux, weak memory model)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: cargo test
+
+  # ThreadSanitizer checks the REAL code under real scheduling — the
+  # complement to loom, which checks models. Suppressions cover only
+  # crossbeam-epoch's fence-based sync (invisible to TSan by design);
+  # races in chronomind's own code are not suppressed.
+  tsan:
+    name: thread sanitizer (stress suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+      - name: Stress under TSan
+        run: >
+          cargo +nightly test -Zbuild-std
+          --target x86_64-unknown-linux-gnu
+          --test stress_test -- --test-threads=1
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+          RUSTDOCFLAGS: -Zsanitizer=thread
+          TSAN_OPTIONS: suppressions=${{ github.workspace }}/ci/tsan-suppressions.txt
+
+  # Coverage-guided fuzzing smoke run: arbitrary op sequences with the
+  # graph-invariant sweep as the oracle. Longer runs are manual.
+  fuzz:
+    name: fuzz smoke (index ops vs invariant oracle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz for 90 seconds
+        run: cargo +nightly fuzz run index_ops -- -max_total_time=90
+
   loom:
     name: loom model checks
     runs-on: ubuntu-latest

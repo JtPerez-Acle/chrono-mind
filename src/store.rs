@@ -434,6 +434,50 @@ impl ChronoMind {
     /// Takes `&mut self`: this is an `O(n²)` maintenance pass that wants
     /// exclusive access for trivially correct pairwise bookkeeping — run it
     /// from a maintenance thread, not the hot path.
+    ///
+    /// # Calling this on a shared store
+    ///
+    /// `&mut self` is intentionally uncallable through a shared `Arc`: the
+    /// contract is **quiesce, reclaim sole ownership, consolidate, reshare**.
+    /// Join (or otherwise drain) every worker holding a clone, then take the
+    /// store back:
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use chronomind::{ChronoMind, Config, Memory, Vector};
+    ///
+    /// # fn main() -> chronomind::Result<()> {
+    /// let store = Arc::new(ChronoMind::new(Config::builder().dimensions(2).build()?)?);
+    ///
+    /// // Concurrent phase: clones go to worker threads, all of them &self.
+    /// std::thread::scope(|s| {
+    ///     for t in 0..4 {
+    ///         let store = Arc::clone(&store);
+    ///         s.spawn(move || {
+    ///             store.insert(Memory::from_vector(Vector::new(
+    ///                 format!("w{t}"),
+    ///                 vec![1.0, 0.001 * t as f32],
+    ///             )))
+    ///         });
+    ///     }
+    /// }); // scope joins every worker: refcount is back to 1
+    ///
+    /// // Maintenance phase: reclaim exclusive ownership, then consolidate.
+    /// let mut store = Arc::try_unwrap(store).expect("all workers joined");
+    /// let merged = store.consolidate();
+    /// assert!(merged >= 2, "the near-duplicate directions merge");
+    ///
+    /// // Reshare for the next concurrent phase.
+    /// let store = Arc::new(store);
+    /// # drop(store);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// `Arc::get_mut` works the same way when you only need a temporary
+    /// `&mut` without unwrapping. If sole ownership cannot be proven
+    /// (`try_unwrap`/`get_mut` fail), a worker still holds a clone — that is
+    /// the compiler enforcing the quiesce contract, not an inconvenience.
     #[instrument(skip(self))]
     pub fn consolidate(&mut self) -> usize {
         let records: Vec<Arc<StoredMemory>> = self.by_id.pin().values().cloned().collect();

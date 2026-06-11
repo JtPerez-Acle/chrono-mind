@@ -1,0 +1,14 @@
+# ThreadSanitizer suppressions.
+#
+# crossbeam-epoch synchronizes with standalone memory fences
+# (atomic::fence), which TSan's happens-before machinery cannot model —
+# it reports false-positive races inside the epoch machinery on every
+# fence-paired access. This is a known TSan limitation, and crossbeam's
+# own CI carries the same class of suppression.
+#
+# Scope is deliberately narrow: only crossbeam internals are suppressed.
+# Races in chronomind's own code are NOT suppressed — finding those is
+# the entire point of the TSan job. The epoch protocol itself is covered
+# by loom (model checking) and Miri (tree borrows) instead.
+race:crossbeam_epoch
+race:crossbeam_utils

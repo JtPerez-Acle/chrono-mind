@@ -32,6 +32,8 @@ loom = "0.7"
 
 [dev-dependencies]
 criterion = "0.5"
+# The reclamation gate drives the COW primitive directly with pinned guards.
+crossbeam-epoch = "0.9"
 proptest = "1.4"
 tempfile = "3.8"
 
