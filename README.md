@@ -172,6 +172,18 @@ Numbers vary with hardware and run-to-run (~±15% between sessions); the
 scaling *shapes* and order-of-magnitude gaps are the durable signal. Full
 method and analysis: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
+**Against the field.** A separate head-to-head
+(`cargo bench --bench external --features bench-external`) runs the same
+data and parameters through instant-distance, hnsw_rs, and usearch — the
+C++ SIMD engine that is the serious yardstick. Result over two runs:
+**search throughput at parity with usearch within run noise** (each run
+had a different leader; both ~29–34K QPS at 8 threads, recall 0.998), 3–4×
+faster search than the pure-Rust crates, parallel build within ~20% of
+usearch. One dataset shape, one size, one machine, f32 only — the caveats
+and full table live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), and
+usearch's quantization modes (disabled for apples-to-apples) would change
+the picture in its favor at scale.
+
 ## The temporal model
 
 Every memory carries `MemoryAttributes`:

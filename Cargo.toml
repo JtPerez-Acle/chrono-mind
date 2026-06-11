@@ -30,6 +30,13 @@ indicatif = "0.17"
 # Needed by the CLI binary to surface `tracing` logs; the library itself only emits spans.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# External ANN libraries, pulled in ONLY by the `bench-external` feature for
+# the head-to-head comparison (benches/external.rs). Never part of a normal
+# build of the library.
+instant-distance = { version = "0.6.1", optional = true }
+hnsw_rs = { version = "0.3.4", optional = true }
+usearch = { version = "2.25.3", optional = true }
+
 # Model checker for the lock-free primitives. Only resolved when building
 # with RUSTFLAGS="--cfg loom"; never part of a normal build.
 [target.'cfg(loom)'.dependencies]
@@ -57,3 +64,13 @@ opt-level = 2
 [[bin]]
 name = "chronomind"
 path = "src/main.rs"
+
+[features]
+# Enables the external head-to-head benchmark:
+#   cargo bench --bench external --features bench-external
+bench-external = ["dep:instant-distance", "dep:hnsw_rs", "dep:usearch"]
+
+[[bench]]
+name = "external"
+harness = false
+required-features = ["bench-external"]
