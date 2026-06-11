@@ -48,7 +48,7 @@ A/B comparison of the lock-free HNSW index (`LockFreeHnsw`) against the
 RwLock baseline (`RwLockHnsw`) — same algorithm, same parameters, different
 concurrency control.
 
-## Method
+### Method
 
 - `cargo bench` (criterion 0.5), bench target `benches/comparison.rs`.
 - Data: 768-dimensional unit vectors confined to a random 16-d subspace
@@ -60,13 +60,18 @@ concurrency control.
     split evenly across threads.
   - `search_qps`: 2,000 queries against a pre-built 10,000-vector index.
   - `mixed_90_10`: 2,000 ops, 90% search / 10% insert, against a
-    pre-built 10,000-vector index (rebuilt per sample so insert drift
-    cannot compound).
+    pre-built 10,000-vector index. One index per thread-count
+    configuration; the 10% inserts accumulate across criterion samples
+    (bounded, ~200/iteration on a 10k corpus) rather than rebuilding per
+    sample, which would make graph construction dominate the timing.
 - Sizes are deliberately minutes-scale: the meaningful signal is the
-  *relative scaling under contention* of the two implementations, which is
-  stable across corpus size; absolute numbers vary with hardware.
+  *relative scaling under contention* of the implementations, which is
+  stable across corpus size; absolute numbers vary with hardware. (These
+  criterion measurements run a touch lower than the external suite's
+  best-of-three QPS — e.g. ~26K vs ~29K search at 8T — because criterion
+  reports a full-distribution estimate, not the best pass.)
 
-## Contenders
+### Contenders
 
 - `lockfree` — the lock-free index (`LockFreeHnsw`)
 - `rwlock` — the same algorithm behind one `RwLock` (`RwLockHnsw`)
@@ -74,7 +79,7 @@ concurrency control.
   locked shards, round-robin inserts, scatter-gather search. This is what a
   practitioner would actually deploy to make a locked design scale writes.
 
-## Results
+### Results
 
 Machine: Intel i7-12700KF (12 cores / 20 threads), Windows 11, Rust stable
 1.93, June 2026. Ops/sec (criterion mid-estimates), all three columns from
@@ -112,15 +117,16 @@ bench` sessions (absolute numbers drift ~±15% with machine state; ordering
 and scaling shape agree). The sharded16 deltas are order-of-magnitude —
 far beyond session variance.
 
-## Reading the three-way comparison
+### Reading the three-way comparison
 
 - **Sharding wins pure construction, honestly.** Round-robin over 16
   shards means each insert searches a graph 1/16th the size *and* writers
   rarely contend — 2.4× over lock-free at 8 threads. If your workload is
   bulk-load-then-freeze, shard it.
 - **Sharding loses everything else.** Every query pays 16 sub-searches
-  plus a merge: ~9× slower on pure search, 22× slower on the mixed
-  workload. The read tax is structural, not tunable.
+  plus a merge: 9× slower on pure search at 1 thread (7.5× at 8 threads,
+  where lock-free's read scaling narrows the gap), and 22× slower on the
+  mixed workload at 8 threads. The read tax is structural, not tunable.
 - **The single RwLock is flat wherever writes exist** — serialized
   writers can't use threads, and exclusive writers stall every reader the
   moment 10% of traffic writes.
