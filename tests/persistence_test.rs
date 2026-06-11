@@ -6,7 +6,7 @@ use chronomind::{
 };
 
 fn sample_store() -> ChronoMind {
-    let mut store = ChronoMind::new(Config {
+    let store = ChronoMind::new(Config {
         dimensions: 4,
         ..Config::default()
     })
@@ -38,9 +38,9 @@ fn snapshot_roundtrip_preserves_everything() {
 
     assert_eq!(loaded.len(), store.len());
     assert_eq!(loaded.config(), store.config());
-    for original in store.iter() {
+    for original in store.snapshot() {
         let restored = loaded.get(&original.vector.id).unwrap();
-        assert_eq!(&restored, original);
+        assert_eq!(restored, original);
     }
 }
 

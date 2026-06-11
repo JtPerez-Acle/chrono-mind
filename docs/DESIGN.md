@@ -278,6 +278,28 @@ Rules for autonomous execution:
 
 ## Appendix B — Deviations from the original plan
 
+0. **§5 Miri flags (M3/M4).** The plan called for one Miri run with
+   `-Zmiri-strict-provenance`. crossbeam-epoch 0.9 is incompatible with both
+   strict provenance (tagged pointers use int↔ptr casts) and Stacked Borrows
+   (its `container_of`-style thread-local list violates SB; upstream validates
+   under Tree Borrows). Resolution: two Miri jobs — the arena (pure std
+   atomics) under Stacked Borrows + strict provenance, the full index under
+   `-Zmiri-tree-borrows -Zmiri-ignore-leaks`, matching crossbeam's own
+   validation model and CI flags (epoch garbage still queued at process exit is
+   reported as a leak by design; UB and data-race detection stay fully active —
+   the arena job keeps full leak checking). Both must be clean. Two additional
+   Miri findings during M3/M4: the seeded-determinism tests asserted bit-exact
+   distances, which Miri's deliberate floating-point jitter breaks — they now
+   assert ranking identity (the property that matters) and bit-exactness only
+   natively.
+
+0b. **§8 commit granularity (M3/M4).** Milestones 3 and 4 land as one commit:
+   the store rework proceeded while the (slow, Windows-hostile) Miri gate for
+   the primitives was still running, and by the time it went green the edits
+   interleaved in `index/mod.rs` and `Cargo.toml`. Both milestones' gates were
+   met independently before the commit; the buildable-at-every-commit rule
+   holds.
+
 1. **§4 recall gate, 768-d case (M2).** The original gate — recall@10 ≥ 0.95 on
    *uniform* random 768-d unit vectors at default `ef_search = 50` — turned out to be
    unachievable for any HNSW implementation: with uniform high-dimensional data all

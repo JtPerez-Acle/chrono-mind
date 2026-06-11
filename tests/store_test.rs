@@ -25,7 +25,7 @@ fn memory_in_context(id: &str, data: Vec<f32>, context: &str) -> Memory {
 
 #[test]
 fn insert_and_get_roundtrip() {
-    let mut store = ChronoMind::new(config(3)).unwrap();
+    let store = ChronoMind::new(config(3)).unwrap();
     store.insert(memory("a", vec![1.0, 0.0, 0.0])).unwrap();
 
     let got = store.get("a").unwrap();
@@ -36,7 +36,7 @@ fn insert_and_get_roundtrip() {
 
 #[test]
 fn search_returns_nearest_first() {
-    let mut store = ChronoMind::new(config(3)).unwrap();
+    let store = ChronoMind::new(config(3)).unwrap();
     store.insert(memory("x", vec![1.0, 0.0, 0.0])).unwrap();
     store.insert(memory("y", vec![0.0, 1.0, 0.0])).unwrap();
     store.insert(memory("z", vec![0.7, 0.7, 0.0])).unwrap();
@@ -52,7 +52,7 @@ fn search_returns_nearest_first() {
 
 #[test]
 fn search_k_truncates() {
-    let mut store = ChronoMind::new(config(2)).unwrap();
+    let store = ChronoMind::new(config(2)).unwrap();
     for i in 0..10 {
         let angle = i as f32 * 0.1;
         store
@@ -66,7 +66,7 @@ fn search_k_truncates() {
 fn temporal_weight_prefers_recent_memories() {
     // Two identical vectors; one is a week old. With temporal weighting the
     // fresh one must rank first.
-    let mut store = ChronoMind::new(Config {
+    let store = ChronoMind::new(Config {
         dimensions: 2,
         temporal_weight: 0.5,
         ..Config::default()
@@ -93,7 +93,7 @@ fn temporal_weight_prefers_recent_memories() {
 
 #[test]
 fn zero_temporal_weight_ranks_purely_by_distance() {
-    let mut store = ChronoMind::new(Config {
+    let store = ChronoMind::new(Config {
         dimensions: 2,
         temporal_weight: 0.0,
         ..Config::default()
@@ -118,7 +118,7 @@ fn zero_temporal_weight_ranks_purely_by_distance() {
 
 #[test]
 fn context_search_filters() {
-    let mut store = ChronoMind::new(config(2)).unwrap();
+    let store = ChronoMind::new(config(2)).unwrap();
     store
         .insert(memory_in_context("a", vec![1.0, 0.0], "alpha"))
         .unwrap();
@@ -133,7 +133,7 @@ fn context_search_filters() {
 
 #[test]
 fn invalid_inputs_are_rejected() {
-    let mut store = ChronoMind::new(config(3)).unwrap();
+    let store = ChronoMind::new(config(3)).unwrap();
 
     assert!(matches!(
         store.insert(memory("short", vec![1.0])),
@@ -165,7 +165,7 @@ fn invalid_inputs_are_rejected() {
 
 #[test]
 fn capacity_is_enforced_but_replacement_is_allowed() {
-    let mut store = ChronoMind::new(Config {
+    let store = ChronoMind::new(Config {
         dimensions: 2,
         max_memories: 2,
         ..Config::default()
@@ -185,7 +185,7 @@ fn capacity_is_enforced_but_replacement_is_allowed() {
 
 #[test]
 fn reinsert_merges_relationships() {
-    let mut store = ChronoMind::new(config(2)).unwrap();
+    let store = ChronoMind::new(config(2)).unwrap();
 
     let mut first = memory("a", vec![1.0, 0.0]);
     first.attributes.relationships = vec!["b".into()];
@@ -202,7 +202,7 @@ fn reinsert_merges_relationships() {
 
 #[test]
 fn access_records_retrieval() {
-    let mut store = ChronoMind::new(config(2)).unwrap();
+    let store = ChronoMind::new(config(2)).unwrap();
     store.insert(memory("a", vec![1.0, 0.0])).unwrap();
 
     let before = store.get("a").unwrap();
@@ -215,7 +215,7 @@ fn access_records_retrieval() {
 
 #[test]
 fn decay_reduces_importance_of_stale_memories() {
-    let mut store = ChronoMind::new(config(2)).unwrap();
+    let store = ChronoMind::new(config(2)).unwrap();
     let week_ago = SystemTime::now() - Duration::from_secs(7 * 24 * 3600);
     store
         .insert(Memory::new(
@@ -239,7 +239,7 @@ fn decay_reduces_importance_of_stale_memories() {
 
 #[test]
 fn decay_leaves_fresh_memories_nearly_intact() {
-    let mut store = ChronoMind::new(config(2)).unwrap();
+    let store = ChronoMind::new(config(2)).unwrap();
     let mut fresh = memory("fresh", vec![1.0, 0.0]);
     fresh.attributes.importance = 0.8;
     store.insert(fresh).unwrap();
@@ -285,7 +285,7 @@ fn consolidate_merges_near_duplicates() {
 
 #[test]
 fn related_walks_links_breadth_first_with_depth_cap() {
-    let mut store = ChronoMind::new(config(2)).unwrap();
+    let store = ChronoMind::new(config(2)).unwrap();
     let mut a = memory("a", vec![1.0, 0.0]);
     a.attributes.relationships = vec!["b".into()];
     let mut b = memory("b", vec![0.9, 0.1]);
@@ -313,7 +313,7 @@ fn related_walks_links_breadth_first_with_depth_cap() {
 
 #[test]
 fn context_summary_aggregates() {
-    let mut store = ChronoMind::new(config(2)).unwrap();
+    let store = ChronoMind::new(config(2)).unwrap();
     let mut a = memory_in_context("a", vec![1.0, 0.0], "ctx");
     a.attributes.importance = 0.4;
     let mut b = memory_in_context("b", vec![0.0, 1.0], "ctx");
@@ -330,7 +330,7 @@ fn context_summary_aggregates() {
 
 #[test]
 fn stats_reflect_contents() {
-    let mut store = ChronoMind::new(config(2)).unwrap();
+    let store = ChronoMind::new(config(2)).unwrap();
     let mut a = memory_in_context("a", vec![1.0, 0.0], "ctx1");
     a.attributes.relationships = vec!["b".into()];
     let b = memory_in_context("b", vec![0.0, 1.0], "ctx2");
@@ -347,7 +347,7 @@ fn stats_reflect_contents() {
 
 #[test]
 fn remove_deletes() {
-    let mut store = ChronoMind::new(config(2)).unwrap();
+    let store = ChronoMind::new(config(2)).unwrap();
     store.insert(memory("a", vec![1.0, 0.0])).unwrap();
     assert!(store.remove("a").is_some());
     assert!(store.remove("a").is_none());

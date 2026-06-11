@@ -9,8 +9,12 @@
 //! store maintains the mapping between caller-facing string ids and index
 //! handles.
 
+pub(crate) mod arena;
+mod lockfree_hnsw;
+pub(crate) mod neighbors;
 mod rwlock_hnsw;
 
+pub use lockfree_hnsw::LockFreeHnsw;
 pub use rwlock_hnsw::RwLockHnsw;
 
 /// An `f32` wrapper with total ordering via [`f32::total_cmp`].

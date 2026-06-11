@@ -12,6 +12,8 @@ keywords = ["vector-store", "hnsw", "temporal", "memory", "ai"]
 categories = ["data-structures", "database-implementations"]
 
 [dependencies]
+crossbeam-epoch = "0.9"
+papaya = "0.2"
 rand = "0.8"
 thiserror = "1.0"
 tracing = "0.1"
@@ -23,9 +25,22 @@ indicatif = "0.17"
 # Needed by the CLI binary to surface `tracing` logs; the library itself only emits spans.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Model checker for the lock-free primitives. Only resolved when building
+# with RUSTFLAGS="--cfg loom"; never part of a normal build.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [dev-dependencies]
+criterion = "0.5"
 proptest = "1.4"
 tempfile = "3.8"
+
+[[bench]]
+name = "comparison"
+harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
 # Recall tests do millions of 768-dimensional distance computations;
 # unoptimized test binaries make them unbearably slow.

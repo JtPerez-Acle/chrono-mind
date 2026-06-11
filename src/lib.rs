@@ -6,9 +6,11 @@
 //! Memories decay, can be consolidated when near-duplicate, and can be
 //! linked into relationship graphs.
 //!
-//! The library is fully synchronous: there is no async runtime dependency,
-//! and a store can be shared across threads once the concurrent index lands
-//! (see `docs/DESIGN.md` for the roadmap).
+//! The library is fully synchronous and fully concurrent: there is no
+//! async runtime dependency, the entire API (except the `consolidate`
+//! maintenance pass) takes `&self`, and nothing anywhere blocks on a mutex
+//! or RwLock. Searches are wait-free; writes are lock-free. Share a store
+//! across threads with `Arc` and use it from all of them at once.
 //!
 //! # Example
 //!
@@ -17,7 +19,7 @@
 //!
 //! # fn main() -> chronomind::Result<()> {
 //! let config = Config::builder().dimensions(4).build()?;
-//! let mut store = ChronoMind::new(config)?;
+//! let store = ChronoMind::new(config)?;
 //!
 //! store.insert(Memory::new(
 //!     Vector::new("first", vec![0.1, 0.2, 0.3, 0.4]),
@@ -34,7 +36,7 @@
 //! # }
 //! ```
 
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 #![warn(rust_2018_idioms)]
 
 pub mod config;

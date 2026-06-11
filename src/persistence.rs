@@ -32,7 +32,7 @@ struct SnapshotBody {
 pub fn save_snapshot(store: &ChronoMind, path: &Path) -> Result<()> {
     let body = SnapshotBody {
         config: store.config().clone(),
-        memories: store.iter().cloned().collect(),
+        memories: store.snapshot(),
     };
 
     let file = File::create(path)?;
@@ -77,7 +77,7 @@ pub fn load_snapshot(path: &Path) -> Result<ChronoMind> {
     }
 
     let body: SnapshotBody = bincode::deserialize_from(&mut reader)?;
-    let mut store = ChronoMind::new(body.config)?;
+    let store = ChronoMind::new(body.config)?;
     let count = body.memories.len();
     for memory in body.memories {
         store.insert(memory)?;

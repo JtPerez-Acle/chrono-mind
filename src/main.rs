@@ -154,7 +154,7 @@ fn save_command(
         max_memories,
         ..Config::default()
     };
-    let mut store = ChronoMind::new(config)?;
+    let store = ChronoMind::new(config)?;
 
     let raw = std::fs::read_to_string(input)?;
     let parsed: Value = serde_json::from_str(&raw)?;

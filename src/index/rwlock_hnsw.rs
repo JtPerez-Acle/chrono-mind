@@ -407,7 +407,8 @@ mod tests {
             ef_search: 16,
         };
         let idx = RwLockHnsw::with_seed(params, Arc::new(CosineDistance::new()), 7);
-        for i in 0..200 {
+        let n = if cfg!(miri) { 40 } else { 200 };
+        for i in 0..n {
             let angle = i as f32 * 0.05;
             idx.insert(&[angle.cos(), angle.sin()]);
         }
@@ -432,7 +433,8 @@ mod tests {
     #[test]
     fn entry_point_tracks_highest_layer() {
         let idx = index();
-        for i in 0..100 {
+        let n = if cfg!(miri) { 30 } else { 100 };
+        for i in 0..n {
             let angle = i as f32 * 0.1;
             idx.insert(&[angle.cos(), angle.sin()]);
         }
@@ -446,12 +448,19 @@ mod tests {
     fn seeded_indexes_are_deterministic() {
         let build = || {
             let idx = index();
-            for i in 0..50 {
+            let n = if cfg!(miri) { 15 } else { 50 };
+            for i in 0..n {
                 let angle = i as f32 * 0.13;
                 idx.insert(&[angle.cos(), angle.sin()]);
             }
             idx.search(&[1.0, 0.0], 10)
         };
-        assert_eq!(build(), build());
+        let (a, b) = (build(), build());
+        let ids = |r: &[(u32, f32)]| r.iter().map(|&(id, _)| id).collect::<Vec<_>>();
+        assert_eq!(ids(&a), ids(&b), "construction must be deterministic");
+        // Distances are bit-identical natively; Miri deliberately jitters
+        // the last bit of float ops, so only the ranking is asserted there.
+        #[cfg(not(miri))]
+        assert_eq!(a, b);
     }
 }
