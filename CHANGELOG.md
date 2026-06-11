@@ -5,365 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-06-11
+
+Ground-up rework. The previous codebase claimed to be lock-free and
+concurrent while serializing every write behind `RwLock<HashMap>`s and
+`&mut self` APIs; it shipped two parallel implementations of nearly every
+type, dead modules that never compiled, and benchmarks measuring an index
+the public API never used. 0.2.0 deletes all of it and makes the claims
+true instead. See `docs/DESIGN.md` for the full audit and design.
+
+### Changed (breaking — everything)
+- Crate renamed `vector-store` → `chronomind`; binary renamed to
+  `chronomind`.
+- License changed from Apache-2.0 only to dual **MIT OR Apache-2.0**.
+- The library is now fully synchronous: tokio and async-trait removed.
+  Every former `async fn` was fake async (no awaited IO existed).
+- Single set of types: one `Vector`, one `Memory` (was `TemporalVector`
+  with duplicated fields), one `Config`, one store, one error enum.
+- Snapshot persistence replaces ad-hoc JSON: versioned binary format
+  (`CHRONO1` magic + format byte, bincode body). Old `.store` files are
+  not readable.
+- Temporal scoring extracted into one documented formula applied as a
+  rerank over index candidates; the index itself is purely geometric.
+
 ### Added
-- CLI interface with commands for save, query, and stats
-- Persistence layer tests
-- User guide documentation
-- Developer quick start guide
-- Sample vector data for testing
-- Code review documentation
-- Data flow analysis
-- Future improvements roadmap
-- TODO list for future development
-- New modular codebase structure with clear separation of concerns:
-  - `core`: Essential components (error, config, logging)
-  - `memory`: Memory management (temporal, traits, types)
-  - `storage`: Storage implementations and metrics
-  - `utils`: Validation and monitoring utilities
-- Temporal-aware similarity metrics with:
-  - Time-based decay
-  - Importance weighting
-  - Access frequency consideration
-- Comprehensive test suite with:
-  - Property-based testing
-  - Concurrent access testing
-  - Memory validation
-  - Context operations testing
-  - Comprehensive benchmark suite:
-    - HNSW graph construction benchmarks
-    - Similarity search performance tests
-    - Temporal decay impact measurements
-    - Memory usage tracking
-    - Comparative analysis with other solutions
-- Enhanced monitoring and observability:
-  - Integration with OpenTelemetry for metrics collection
-  - Memory leak detection and prevention
-  - Structured logging with tracing
-  - Async monitoring support
-- Performance optimizations:
-  - SIMD acceleration for vector operations using AVX-512
-  - Improved concurrent benchmarking with adaptive batch sizing
-  - Enhanced metric collection (cache misses, branch misses)
-  - Reduced memory allocations and improved memory reuse
-- Memory system features:
-  - Automatic memory decay
-  - Importance-based cleanup
-  - Context-based organization
-  - Relationship tracking
-  - Memory consolidation
-  - Health monitoring
-  - Performance metrics
-- Error handling:
-  - Custom error types with thiserror
-  - Validation checks
-  - Proper error propagation
-- Configuration system:
-  - Memory limits
-  - Decay parameters
-  - Context settings
-  - Relationship limits
-- Monitoring utilities:
-  - Performance tracking
-  - Health checks
-  - Memory statistics
-  - Context summaries
-- Temporal-aware HNSW implementation:
-  - Multi-layer graph structure
-  - Temporal score integration
-  - Efficient neighbor selection
-  - Dynamic layer management
-  - Concurrent access support
-  - Configurable parameters
-- Enhanced monitoring system with OpenTelemetry integration
-  - Added structured metrics collection for operations, memory usage, and vector operations
-  - Implemented async monitoring support with proper error handling
-  - Added detailed performance tracking with PerformanceMonitor
-- Improved memory management
-  - Added configurable importance thresholds and decay rates
-  - Implemented sophisticated temporal decay algorithm
-  - Enhanced memory cleanup based on importance thresholds
-- Better error handling and logging
-  - Added detailed error types and proper error propagation
-  - Enhanced logging with debug and warning levels
-  - Improved error messages with context
-- Enhanced temporal memory system with configurable decay rates and importance thresholds
-- Added comprehensive benchmarks for temporal memory operations
-- Implemented SIMD optimizations using AVX-512 for vector operations
-- Added support for context-based memory operations and relationships
-- Introduced detailed performance metrics tracking (throughput, latency, cache misses)
-- Added OpenTelemetry integration for structured metrics collection
-- Improved error handling with new `MemoryError` variants
-- Added `MemoryStats` struct for better memory usage tracking
-- Enhanced HNSW layer statistics with detailed metrics
-- Added validation for vector dimensions and data
-- Enhanced HNSW implementation with improved temporal-aware graph structure
-- Added robust dimension validation with detailed error reporting
-- Implemented comprehensive layer statistics tracking
-- Added support for temporal vector attributes in test utilities
-- Added `TaskError` and `Other` variants to `MemoryError` for better error handling
-- Implemented `From<tokio::task::JoinError>` for `MemoryError`
-- Added `ef_search` parameter to HNSW configuration for better search control
-- Comprehensive benchmark suite with advanced metrics collection
-  - Latency profiling (p50, p95, p99, std dev)
-  - Throughput measurements (QPS, operations/sec)
-  - Resource utilization tracking (CPU, memory, optional GPU)
-  - Quality metrics (recall@10, precision@10, MRR)
-  - System performance indicators (cache hits, I/O ops)
-- Vector quality thresholds for performance targets
-  - 95% minimum recall target
-  - 10ms maximum latency target
-  - 1000 QPS throughput target
-- Enhanced benchmark configuration
-  - Logarithmic scale plotting
-  - Standardized warm-up and measurement periods
-  - Statistical significance in sample sizes
-- Normalized vector generation for consistent distance measurements
+- **Lock-free concurrent HNSW index** (`index::LockFreeHnsw`): wait-free
+  reads, lock-free writes. Chunked append-only node arena, copy-on-write
+  neighbor lists with crossbeam-epoch reclamation, packed atomic entry
+  point, tombstone deletes.
+- Fully concurrent `&self` store API: insert, search, get, access, remove,
+  decay sweeps and stats all run from any number of threads; importance
+  and access tracking are atomics (`papaya` maps at the id boundary).
+- `RwLockHnsw`: the same algorithm behind a single lock, kept as the
+  correctness reference and benchmark baseline.
+- Verification suite: loom model checks of the CAS and arena protocols,
+  Miri (strict provenance) over the unsafe primitives, seeded recall gates
+  (≥ 0.95 vs brute force) for both indexes, a 768-d connectivity gate, a
+  16-thread/104k-op stress gate with full graph-invariant sweep, and
+  proptest property tests.
+- Criterion A/B benchmarks (`cargo bench`): insert / search / mixed
+  workloads across 1–8 threads, lock-free vs baseline.
+- GitHub Actions CI: fmt, clippy `-D warnings`, tests, doc build, loom and
+  Miri jobs, on Windows and Linux.
+- HNSW correctness fixes over the old code: proper layer assignment
+  (`floor(-ln(u)·mL)`, was capped at vector dimensionality), greedy
+  descent through all layers (was missing), correct heap orientation (the
+  old code evicted its *best* candidates), `f32::total_cmp` ordering (the
+  old code could NaN-poison comparisons), Algorithm 4 diversity-aware
+  neighbor selection.
 
-### Changed
-- Updated README with installation and usage instructions
-- Improved error handling in persistence layer
-- Fixed dimension validation in tests
-- Restructured entire codebase for better modularity
-- Improved code organization with clear module boundaries
-- Enhanced public API with better type re-exports
-- Optimized vector operations for better performance
-- Improved error handling with specific error types
-- Enhanced logging system with structured output
-- Upgraded test suite with comprehensive coverage
-- Refactored configuration system for better usability
-- Improved memory management algorithms
-- Enhanced similarity search with temporal awareness
-- Optimized HNSW graph construction
-- Improved neighbor selection algorithm
-- Enhanced benchmark suite:
-  - Added realistic vector distributions
-  - Improved measurement methodology
-  - Added large-scale benchmarks
-  - Implemented concurrent testing
-  - Added progress tracking
-  - Optimized runtime usage
-  - Added batch operation tests
-- Code cleanup:
-  - Fixed unused variable warnings
-  - Improved code style consistency
-  - Better variable naming
-- Improved benchmark progress reporting
-  - Added smart progress tracking that only shows updates for large operations (>1000 items)
-  - Implemented single-line updates with carriage return for cleaner output
-  - Added silent mode for small operations to reduce noise
-  - Improved thread-safety in progress tracking for concurrent operations
-  - Streamlined benchmark headers and configuration display
-- Enhanced benchmark documentation
-  - Added detailed performance hypotheses with target metrics
-  - Structured expectations into Excellent/Good/Baseline categories
-  - Included rationale for performance targets
-  - Improved methodology documentation with clear measurement criteria
-  - Added comparative baselines from industry standards
-- Optimized benchmark suite
-  - Reduced test durations and sample sizes for faster execution
-  - Added shared index preparation to avoid redundant work
-  - Improved progress reporting with cleaner, single-line updates
-  - Streamlined test parameters for better developer experience
-  - Added OnceCell for efficient index reuse
-- Optimized benchmark suite
-  - Implemented efficient vector normalization during generation
-  - Added parking_lot::Mutex for better performance in progress tracking
-  - Introduced shared runtime with OnceCell for all benchmarks
-  - Improved index caching with size-based lookup
-  - Fixed race conditions in progress tracking
-  - Removed redundant temporal and large-scale benchmarks
-  - Streamlined benchmark configuration
-- Fixed benchmark implementation
-  - Corrected struct field names and types
-  - Added proper type annotations for numeric operations
-  - Fixed MemoryAttributes initialization
-  - Simplified performance monitoring output
-  - Removed unused imports and metrics
-  - Enhanced error handling in async operations
-- Enhanced benchmark implementation and metrics
-  - Added structured performance metrics collection
-  - Improved metric visualization with tree-style output
-  - Track throughput, latency percentiles (p50, p95, p99)
-  - Monitor memory and CPU usage
-  - Fixed sample size and timing configuration
-  - Optimized query generation for search benchmarks
-  - Added proper warm-up and measurement periods
-- Refactored monitoring module for better modularity
-  - Separated metrics collection into dedicated MetricsRegistry
-  - Improved memory monitoring with MemoryMonitor
-  - Enhanced efficiency metrics calculation
-- Updated temporal memory implementation
-  - Improved thread safety with parking_lot::RwLock
-  - Enhanced memory decay algorithm with multiple factors
-  - Better context summary generation
-- Code organization improvements
-  - Made monitoring and validation modules public
-  - Enhanced code documentation
-  - Improved type safety and error handling
-- Refactored error handling with new error types and improved error messages
-- Updated memory validation with stricter checks and better error reporting
-- Improved memory cleanup based on importance thresholds
-- Enhanced concurrent operations with proper async/await patterns
-- Optimized batch operations with parallel processing
-- Enhanced memory management in MemoryBackend:
-  - Added proper validation for memory vectors
-  - Improved error handling and propagation
-  - Added cleanup strategy for delete operations
-- Improved async implementation:
-  - Added tracing instrumentation to async operations
-  - Better error context in async operations
-  - Proper span management for async tasks
-- Enhanced monitoring capabilities:
-  - Integrated OpenTelemetry tracing
-  - Added structured logging for all critical operations
-  - Improved error reporting with context
-- Enhanced vector operations with SIMD acceleration:
-  - AVX2 and FMA instruction sets for x86_64 architectures
-  - Optimized dot product calculations
-  - Efficient vector magnitude computation
-  - Automatic fallback for non-SIMD architectures
-  - Up to 8x speedup for large vectors
-- Improved memory management:
-  - Better error handling and propagation
-  - Enhanced validation checks
-  - More efficient cleanup strategies
-- Enhanced observability:
-  - Improved OpenTelemetry integration
-  - Better span management
-  - More detailed tracing
-- Refactored config validation to return `MemoryError` instead of string errors
-- Updated `MemoryConfig` to use more precise field types
-- Improved HNSW implementation with better dimension validation
-- Fixed memory leaks in temporal vector storage
-- Refactored HNSW insert operation to prevent multiple mutable borrows
-- Improved node connection management with better memory safety
-- Updated vector validation to be more strict and accurate
-- Enhanced test vector creation with complete attribute support
-- Improved HNSW search scoring to better balance similarity and temporal weights
-- Enhanced memory relationship handling in `save_memory` to properly merge relationships
-- Updated test configurations to use consistent dimensions and parameters
-- Refactored async runtime handling in benchmarks for better reliability
-- Improved benchmark data structures with comprehensive metrics
-- Updated vector store configuration for optimal performance
-- Enhanced memory management in vector operations
-
-### Fixed
-- Fixed argument order in search_by_context method call
-- Removed unused imports
-- Memory leaks in concurrent operations
-- Race conditions in memory updates
-- Inconsistent error handling
-- Configuration validation issues
-- Memory cleanup timing issues
-- Context switching bugs
-- Relationship tracking errors
-- Performance bottlenecks in vector operations
-- Floating-point precision issues
-- HNSW graph construction edge cases
-- Neighbor selection stability
-- Improved error handling in HNSW implementation:
-  - Proper node access validation
-  - Memory error propagation
-- Enhanced temporal score calculation:
-  - Use memory-specific decay rate
-  - Improved importance weighting
-- Improved memory decay algorithm:
-  - Consider time since last access
-  - Use memory-specific decay rates
-  - Added recency factor to decay calculation
-  - Better logging of decay factors
-- Fixed HNSW search ranking:
-  - Correct distance normalization
-  - Proper handling of temporal weights
-  - Fixed pure distance-based sorting
-  - Fixed inconsistent sorting behavior in search results
-  - Corrected vector ranking for pure distance-based searches
-- Memory leak detection in temporal storage
-- Thread safety issues in monitoring system
-- Proper error propagation in memory operations
-- Context summary calculations
-- Vector operation metrics collection
-- Fixed memory leaks in temporal decay calculations
-- Corrected dimension validation in vector operations
-- Fixed race conditions in concurrent memory access
-- Resolved issues with relationship tracking
-- Fixed context-based memory retrieval bugs
-- Fixed dimension validation in HNSW implementation
-- Corrected unused variable warnings in layer statistics
-- Fixed missing fields in test vector creation
-- Resolved multiple mutable borrow issue in HNSW graph updates
-- Fixed dimension validation logic to be more precise
-- Corrected test vector creation to include all required fields
-- Removed unused imports and cleaned up dependencies
-- Fixed temporal scoring in HNSW search to properly prioritize recent memories
-- Fixed relationship tracking in memory storage
-- Fixed dimension validation in tests
-- Fixed concurrent operation handling in HNSW tests
-- Fixed HNSW search layer implementation to properly handle temporal aspects:
-  - Improved scoring mechanism to use weighted combination of distance and temporal score
-  - Ensured proper respect of temporal weight configuration
-  - Fixed ownership issues with references in search and insert operations
-- Enhanced HNSW insert functionality:
-  - Proper initialization of temporal scores for new nodes
-  - Improved handling of entry points and connections
-  - Fixed ownership and borrowing patterns
-- Optimized search implementation:
-  - Simplified scoring mechanism using direct weighted combination
-  - Removed unnecessary distance normalization
-  - Improved temporal weight handling for better result ordering
-- Runtime conflicts in async benchmark operations
-- Inconsistent vector normalization in distance calculations
-- Memory leaks in vector storage operations
-- Race conditions in concurrent vector access
-
-### In Progress
-- Implementing temporal-aware HNSW for efficient similarity search
-- Adding file-based persistence with backup/restore
-- Creating comprehensive benchmarking suite
-- Developing memory sharding capabilities
-- Implementing advanced memory consolidation algorithms
+### Removed
+- `hnsw_rs` dependency (broke Windows builds; wrapped but effectively
+  unused), OpenTelemetry stack, tokio, async-trait, memmap2, parking_lot,
+  and six other unused dependencies.
+- Dead files that were never part of the module tree, two zero-implementor
+  `VectorStorage` traits, the unused in-house `TemporalHNSW`, and the
+  fabricated benchmark results that described them.
 
 ## [0.1.0] - 2025-01-04
 
-### Added
-- Modular codebase structure with core, memory, storage, and utils modules
-- Temporal-aware vector similarity search with HNSW graph implementation
-- Memory management system with:
-  - Time-based decay and importance weighting
-  - Context-based organization
-  - Relationship tracking
-  - Automatic memory consolidation
-- Comprehensive test suite with integration and property-based tests
-- Performance optimizations:
-  - SIMD acceleration for vector operations
-  - Concurrent access optimization
-  - Memory allocation improvements
-
-### Changed
-- Enhanced validation for configuration parameters:
-  - Strict bounds for decay rate (0.0, 1.0)
-  - Strict bounds for similarity threshold (0.0, 1.0)
-  - Vector dimension validation
-- Improved temporal ordering in HNSW search results
-- Refined importance validation in memory storage
-
-### Fixed
-- Memory storage validation for vector dimensions
-- HNSW temporal ordering with configurable weights
-- Context-based search result ordering
-- Error handling for invalid importance values
-- Concurrent access patterns in memory storage
-
-### Security
-- Strict validation of all user-provided configuration values
-- Memory bounds checking for vector operations
-- Safe concurrent access patterns
-
-### Performance
-- Optimized vector similarity calculations
-- Improved memory allocation patterns
-- Enhanced concurrent access performance
-- Reduced overhead in temporal scoring
-- Optimized memory relationship merging using HashSet for deduplication
-- Improved HNSW search performance by reducing temporal weight impact on basic similarity searches
+Initial public iteration (as `vector-store`): temporal vector storage with
+HNSW-based search, memory decay, context grouping, relationship tracking,
+JSON persistence, and a CLI. Retrospectively: the concurrency and
+benchmark claims of this version did not hold; see 0.2.0.

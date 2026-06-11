@@ -1,253 +1,210 @@
 # ChronoMind
 
-<div align="center">
+[![CI](https://github.com/JtPerez-Acle/chrono-mind/actions/workflows/ci.yml/badge.svg)](https://github.com/JtPerez-Acle/chrono-mind/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![MSRV](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](Cargo.toml)
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](http://www.apache.org/licenses/LICENSE-2.0)
-[![API Docs](https://img.shields.io/badge/docs-latest-blue.svg)](docs/API.md)
-[![Benchmarks](https://img.shields.io/badge/benchmarks-view-green.svg)](docs/BENCHMARKS.md)
+**A temporal vector store for AI agent memory, built on a genuinely lock-free
+concurrent HNSW index.**
 
-*A high-performance temporal vector store with advanced memory management*
-
-[Features](#key-features) •
-[Performance](#performance) •
-[Getting Started](#getting-started) •
-[API](#api)
-
-</div>
-
-## Overview
-
-ChronoMind is a Rust-based vector similarity search engine that combines HNSW-based search with temporal awareness. It provides:
-
-- Fast vector similarity search with verified P99 latencies
-- Native temporal decay and importance weighting
-- Memory-efficient storage with full temporal metadata
-- Lock-free concurrent operations
-
-## Key Features
-
-### Vector Operations
+ChronoMind stores embedding vectors together with temporal attributes —
+creation time, importance, decay rate, access history — and ranks search
+results by a documented blend of geometric distance and recency. Memories
+decay, near-duplicates consolidate, and related memories link into graphs.
+The entire store is shareable across threads through a plain `&self` API:
+**no operation anywhere in this crate blocks on a mutex or RwLock.**
 
 ```rust
-// Initialize with custom configuration
-let config = MemoryConfig {
-    max_connections: 16,
-    ef_construction: 100,
-    ..Default::default()
-};
-let store = MemoryStorage::new(config)?;
+use chronomind::{ChronoMind, Config, Memory, MemoryAttributes, Vector};
 
-// Save with temporal metadata
-store.save_memory(vector).await?;
+let config = Config::builder().dimensions(4).build()?;
+let store = ChronoMind::new(config)?;   // note: not `mut` — writes are &self
 
-// Search with temporal awareness
-let results = store.search_similar(&query, k).await?;
+store.insert(Memory::new(
+    Vector::new("first", vec![0.1, 0.2, 0.3, 0.4]),
+    MemoryAttributes { importance: 0.8, context: "demo".into(), ..Default::default() },
+))?;
+
+let results = store.search(&[0.1, 0.2, 0.3, 0.4], 5)?;
+# Ok::<(), chronomind::Error>(())
 ```
 
-### Core Capabilities
+## The lock-free claim, precisely
 
-- **HNSW-Based Search**: Multi-layer graph structure for efficient approximate nearest neighbor search
-- **Temporal Awareness**: Native support for time-based memory decay and importance weighting
-- **Concurrent Operations**: Lock-free architecture for parallel processing
-- **Memory Efficiency**: Optimized storage with minimal overhead
+Most "concurrent" vector stores wrap their index in a reader-writer lock.
+ChronoMind does not. The claim, stated as exactly as the code delivers it:
 
-## Performance
+> **Reads are wait-free** — an epoch-pinned search performs only atomic
+> pointer loads: no CAS, no retry loop, no lock, regardless of concurrent
+> writer activity. **Writes are lock-free** — publication is a single
+> compare-and-swap; a writer retries only when another writer has
+> *succeeded*, so the system always makes progress.
 
-Our benchmarks are continuously updated and available in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+The design that makes it true:
 
-### Search Performance (P99)
+```
+            ┌────────────────────────────────────────────────┐
+   search ─►│ entry point        one packed AtomicU64        │
+            │   │                                            │
+            │   ▼                                            │
+            │ node arena         chunked, append-only —      │
+            │   │                nodes never move, u32       │
+            │   │                handles stay valid forever  │
+            │   ▼                                            │
+            │ neighbor lists     immutable COW slices,       │
+            │                    swapped by CAS, reclaimed   │
+            │                    by crossbeam-epoch          │
+            └────────────────────────────────────────────────┘
+```
 
-| Dataset Size | ExactMatch | Semantic | Hybrid |
-|-------------|------------|----------|---------|
-| Small (10K) | 69.8µs | 1.19ms | 520.8µs |
-| Medium (100K) | 279.2µs | 3.50ms | 1.79ms |
+- **Node arena** (`src/index/arena.rs`): slots are reserved with one
+  `fetch_add` and published with a release-ordered `ready` flag. Nodes are
+  never moved or freed while the index lives, so traversal needs no
+  reclamation protocol for nodes at all.
+- **COW neighbor lists** (`src/index/neighbors.rs`): each (node, layer)
+  adjacency is an atomic pointer to an immutable slice. Writers build a
+  modified copy and CAS it in; replaced slices are destroyed only after
+  every thread that could have seen them has moved on (epoch-based
+  reclamation).
+- **Tombstone deletes**: removed nodes keep routing traffic but leave
+  results. Compaction is a snapshot save/load, the standard HNSW tradeoff.
+- **Temporal scoring stays out of the graph.** The index is purely
+  geometric; recency reranks the candidate pool in the store layer. One
+  formula, documented on `ChronoMind::search`, used everywhere:
 
-### Memory Usage
+  ```text
+  score = (1 - w) · distance/2  +  w · (1 - e^(-rate · age_hours))
+  ```
 
-| Vector Type | Memory Per Vector |
-|-------------|------------------|
-| BERT (768d) | 2.8KB |
-| Ada-002 (1536d) | 5.4KB |
-| MiniLM (384d) | 1.2KB |
+## How it's verified
 
-### Throughput
+Claims about concurrent code are cheap; ChronoMind ships its receipts:
 
-- **Concurrent Users**: Tested with 100 simultaneous connections
-- **CPU Usage**: < 40% under full load
-- **Memory Overhead**: < 10% for HNSW graph structure
+| gate | what it proves |
+|---|---|
+| **loom** model checks | The CAS publish protocol and the arena's reserve/write/publish protocol admit no lost updates and no torn reads, verified across *all* reachable interleavings at small scale |
+| **Miri** (strict provenance) | The `unsafe` blocks in the arena and COW lists are free of detected undefined behavior |
+| **Recall gates** | recall@10 ≥ 0.95 vs brute force on embedding-like data (768-d, low intrinsic dimension) and 32-d uniform data — for the lock-free index *and* the locked baseline it's compared against |
+| **Connectivity gate** | Uniform 768-d data at ef=200 still reaches ≥ 0.95: a failure here means broken graph construction, not hard data |
+| **16-thread stress** | 104k mixed ops (75% search / 20% insert / 5% delete), then a full structural invariant sweep (no dangling handles, no duplicate links, no cap violations) and recall ≥ 0.90 over survivors |
+| **CI** | All of the above on every push, Windows and Linux |
 
-## Getting Started
-
-### Installation
-
-#### From Source
+Run them yourself:
 
 ```bash
-# Clone the repository
-git clone https://github.com/JtPerez-Acle/chrono-mind.git
-cd chrono-mind
-
-# Build the project
-cargo build --release
+cargo test                                          # everything incl. recall + stress gates
+RUSTFLAGS="--cfg loom" cargo test --test loom --release   # exhaustive interleavings
+cargo +nightly miri test --lib index                # UB detection
 ```
 
-#### As a Library
+## The baseline ships too
 
-```toml
-[dependencies]
-vector-store = { git = "https://github.com/JtPerez-Acle/chrono-mind.git" }
-```
+`src/index/rwlock_hnsw.rs` is the same HNSW algorithm behind a single
+`RwLock` — deliberately kept, always compiled. It is the correctness
+reference the lock-free index is tested against, and the A/B baseline for
+the benchmarks. If you distrust the fancy version, use `RwLockHnsw`; both
+implement the same `VectorIndex` trait.
 
-### CLI Usage
+## Benchmarks
+
+`cargo bench` runs three A/B workloads (lock-free vs RwLock baseline) at
+1/2/4/8 threads over embedding-like 768-d data: `insert_throughput`,
+`search_qps`, and `mixed_90_10` (90% search / 10% insert).
+
+Measured on an i7-12700KF (12 cores), Windows 11, Rust stable, 768-d
+embedding-like data, M=16 / efC=100 / efS=50. Ops/sec, criterion
+mid-estimates:
+
+**Concurrent inserts** (the workload locks ruin):
+
+| threads | lock-free | RwLock | speedup |
+|--------:|----------:|-------:|--------:|
+| 1 | 3,116 | 3,352 | 0.93× |
+| 2 | 6,415 | 3,303 | 1.94× |
+| 4 | 12,573 | 3,280 | **3.83×** |
+| 8 | 21,313 | 3,277 | **6.50×** |
+
+The lock-free index scales near-linearly; the RwLock baseline is *flat* —
+adding threads to serialized writes buys nothing.
+
+**Mixed 90% search / 10% insert** (the realistic agent-memory workload):
+
+| threads | lock-free | RwLock | speedup |
+|--------:|----------:|-------:|--------:|
+| 1 | 23,619 | 27,296 | 0.87× |
+| 2 | 50,165 | 25,844 | 1.94× |
+| 4 | 90,918 | 26,080 | **3.49×** |
+| 8 | 139,150 | 32,454 | **4.29×** |
+
+Ten percent writers is enough for the lock to throttle every reader.
+
+**Pure search, zero writers**: the RwLock baseline is ~5% *faster* at every
+thread count (uncontended read locks are cheap; epoch pinning is not free).
+That is the honest cost of the lock-free design — you pay a small constant
+read overhead to make writes scale and to guarantee readers never block.
+Numbers vary with hardware; the scaling shapes are the durable signal.
+Full method and tables: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+## The temporal model
+
+Every memory carries `MemoryAttributes`:
+
+- **importance** `[0, 1]` — decays over time via `apply_decay()`
+  (`exp(-rate · hours_since_last_access)`), refreshed by retrieval through
+  `access()`. Decay is an atomic CAS per memory: the sweep runs concurrently
+  with everything else.
+- **decay_rate** — per-memory half-life control; `0.0` inherits the store's
+  `base_decay_rate`.
+- **context** — free-form grouping label; `search_in_context` scans the
+  context exactly (sparse contexts never come back short),
+  `context_summary` aggregates a centroid.
+- **relationships** — directed links between memories; `related(id, depth)`
+  walks them breadth-first. `consolidate()` merges near-duplicates
+  (cosine similarity above `similarity_threshold`) and merges their links.
+
+## CLI
 
 ```bash
-# Save sample vectors
-./target/release/vector-store save --input examples/sample_vectors.json --output vectors.store --dimensions 4 --normalize
+cargo install --path .
 
-# Query vectors
-./target/release/vector-store query --file vectors.store --vector "[0.1, 0.2, 0.3, 0.4]" --limit 3 --normalize
-
-# Query vectors with context filtering
-./target/release/vector-store query --file vectors.store --vector "[0.1, 0.2, 0.3, 0.4]" --context "my_context" --limit 5
-
-# Get statistics
-./target/release/vector-store stats --file vectors.store
+chronomind save  --input vectors.json --output memories.chrono --dimensions 4 --normalize
+chronomind query --file memories.chrono --vector "[0.1, 0.2, 0.3, 0.4]" --limit 3
+chronomind query --file memories.chrono --vector "0.1,0.2,0.3,0.4" --context conversations
+chronomind stats --file memories.chrono
 ```
 
-#### CLI Features
+Snapshots are a versioned binary format (`CHRONO1` magic + format byte);
+the index is rebuilt on load.
 
-- **Progress Bars**: Visual feedback for large vector operations
-- **Vector Normalization**: Automatically normalize vectors to unit length with `--normalize` flag
-- **Context Filtering**: Filter query results by context with `--context` option
-- **User-Friendly Error Messages**: Clear guidance when errors occur
-- **Flexible Vector Input**: Support for both JSON array and comma-separated formats
+## Design notes for the curious
 
-### Library Usage
+- **Why is the library synchronous?** Because nothing in it waits on IO.
+  The previous incarnation of this crate had `async fn` everywhere with
+  zero awaited IO — async theater. A `Send + Sync` store with `&self`
+  methods composes with any runtime (wrap calls in `spawn_blocking` if they
+  ever measure as slow) and with plain threads.
+- **Why does `consolidate` take `&mut self`?** It is an O(n²) maintenance
+  pass. Exclusive access keeps its pairwise bookkeeping trivially correct;
+  that is an API decision made visible in the signature, not a hidden lock.
+- **Where are the `unsafe` blocks?** All in `src/index/arena.rs` and
+  `src/index/neighbors.rs`, each with a `// SAFETY:` comment stating its
+  invariant, all covered by loom + Miri. The rest of the crate is safe
+  Rust.
+- **Known limits**: tombstones accumulate until a snapshot reload; the
+  capacity check is approximate under concurrent insertion (bounded
+  overshoot); concurrent inserts cannot link to each other (standard for
+  concurrent HNSW construction — covered by the stress recall gate).
 
-```rust
-use std::sync::Arc;
-use vector_store::{
-    core::config::MemoryConfig,
-    memory::temporal::MemoryStorage,
-    memory::types::{MemoryAttributes, TemporalVector, Vector},
-    storage::metrics::CosineDistance,
-};
+Full architecture and milestone history: [docs/DESIGN.md](docs/DESIGN.md).
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create configuration
-    let config = MemoryConfig::default();
+## Roadmap
 
-    // Create storage with cosine distance metric
-    let metric = Arc::new(CosineDistance::new());
-    let mut storage = MemoryStorage::new(config, metric);
-
-    // Create and save a vector
-    let vector = Vector::new(
-        "vector1".to_string(),
-        vec![0.1, 0.2, 0.3, 0.4],
-    );
-
-    let temporal = TemporalVector::new(
-        vector,
-        MemoryAttributes::default(),
-    );
-
-    // Save the vector
-    storage.save_memory(temporal).await?;
-
-    // Query similar vectors
-    let query = vec![0.1, 0.2, 0.3, 0.4];
-    let results = storage.search_similar(&query, 10).await?;
-
-    for (memory, score) in results {
-        println!("ID: {}, Score: {}", memory.vector.id, score);
-    }
-
-    Ok(())
-}
-```
-
-## Documentation
-
-- [User Guide](docs/USER_GUIDE.md): Detailed instructions for using ChronoMind
-- [Code Review](docs/CODE_REVIEW.md): Comprehensive review of the codebase
-- [Data Flow](docs/DATA_FLOW.md): Analysis of how data flows through the system
-- [Future Improvements](docs/FUTURE_IMPROVEMENTS.md): Roadmap for future development
-- [API Documentation](docs/API.md): Detailed API reference
-
-### Core Components
-
-- `MemoryStorage`: Primary interface for vector operations
-- `TemporalVector`: Vector type with temporal metadata
-- `MemoryBackend`: Storage backend for persistence
-- `MemoryConfig`: Configuration for the vector store
-
-### Configuration Options
-
-```rust
-pub struct MemoryConfig {
-    pub max_dimensions: usize,     // Default: 768 (BERT dimensions)
-    pub max_memories: usize,       // Default: 1000
-    pub min_importance: f32,       // Default: 0.0
-    pub max_importance: f32,       // Default: 1.0
-    pub base_decay_rate: f32,      // Default: 0.1
-    pub temporal_weight: f32,      // Default: 0.3
-    pub similarity_threshold: f32, // Default: 0.8
-    pub max_relationships: usize,  // Default: 50
-    pub consolidation_window: Duration, // Default: 24 hours
-    pub similar_memory_count: usize, // Default: 10
-    pub max_context_window: usize, // Default: 1000
-}
-```
-
-## Architecture
-
-ChronoMind uses a multi-layer architecture:
-
-1. **Core Layer**: HNSW-based vector index
-2. **Temporal Layer**: Time-based decay and importance
-3. **Concurrency Layer**: Lock-free operations
-
-## Contributing
-
-We welcome contributions from the community. Please be mindful of Rust's best practices and maintain a clean and readable codebase.
+- Write-ahead log persistence → crash safety and time-travel queries
+- MCP server interface → drop-in persistent memory for AI agents
+- Graph serialization → O(1)-ish snapshot loads
+- Memory tiers (working / episodic / semantic) with consolidation policies
 
 ## License
 
-Apache License 2.0 - See [LICENSE](LICENSE) for details.
-
-## Service Comparison
-
-When evaluating vector stores, it's essential to understand where ChronoMind fits in the ecosystem. Here's an honest comparison with similar services:
-
-### Our Strengths
-
-- **Temporal Features**: Native support for time-based operations and decay, which is unique among current vector stores
-- **Memory Efficiency**: Our verified 2.8KB per BERT vector (768d) is competitive with industry standards
-- **Lock-Free Operations**: True concurrent operations without global locks, beneficial for high-throughput scenarios
-- **Rust Implementation**: Zero-cost abstractions and memory safety guarantees
-
-### Areas for Consideration
-
-- **Maturity**: As a newer solution, we lack the extensive production testing of established solutions like FAISS or Milvus
-- **Ecosystem**: Currently fewer tools and integrations compared to more established solutions
-- **Distribution**: Currently optimized for single-node deployments, while solutions like Milvus offer mature distributed architectures
-- **Documentation**: While growing, our documentation and examples are not as extensive as larger projects
-
-### When to Choose ChronoMind
-
-Consider ChronoMind when you need:
-- Time-aware vector operations with automatic decay
-- High-performance single-node deployments
-- Memory-efficient storage with full temporal metadata
-- Rust-based implementation with strong safety guarantees
-
-Consider alternatives when you need:
-- Distributed deployments across multiple nodes
-- Extensive production track record
-- Large ecosystem of tools and integrations
-- Complex filtering and attribute-based queries
-
-We believe in transparency and encourage users to evaluate their specific needs against our verified capabilities.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at
+your option. Contributions are welcome under the same terms.
