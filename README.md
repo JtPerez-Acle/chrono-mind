@@ -222,10 +222,16 @@ the index is rebuilt on load.
   `src/index/neighbors.rs`, each with a `// SAFETY:` comment stating its
   invariant, all covered by loom + Miri. The rest of the crate is safe
   Rust.
-- **Known limits**: tombstones accumulate until a snapshot reload; the
-  capacity check is approximate under concurrent insertion (bounded
-  overshoot); concurrent inserts cannot link to each other (standard for
-  concurrent HNSW construction — covered by the stress recall gate).
+- **Known limits**: tombstones accumulate until a snapshot reload — and
+  since the arena is append-only, every *reinsert of an existing id* also
+  burns a fresh arena slot, so update-heavy workloads grow memory until a
+  snapshot reload compacts. Vector data is stored twice (once in the index
+  arena for traversal, once in the store record for retrieval and context
+  scans) — 2× vector memory traded for implementation simplicity; halving
+  it is roadmap work. The capacity check is approximate under concurrent
+  insertion (bounded overshoot); concurrent inserts cannot link to each
+  other (standard for concurrent HNSW construction — covered by the
+  stress recall gate).
   And epoch reclamation's classic weakness applies: **a guard pinned
   indefinitely blocks garbage collection**, so deferred slices accumulate
   without bound until it unpins. This is measured behavior, not theory —

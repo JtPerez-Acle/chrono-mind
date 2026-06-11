@@ -56,6 +56,10 @@ struct StoredMemory {
     importance_bits: AtomicU32,
     access_count: AtomicU32,
     last_access_nanos: AtomicU64,
+    /// High-water mark of decay application: [`ChronoMind::apply_decay`]
+    /// decays only the interval since this point, so periodic sweeps
+    /// compose into the documented curve instead of compounding.
+    decayed_through_nanos: AtomicU64,
 }
 
 fn nanos_since_epoch(t: SystemTime) -> u64 {
@@ -78,6 +82,7 @@ impl StoredMemory {
             importance_bits: AtomicU32::new(a.importance.to_bits()),
             access_count: AtomicU32::new(a.access_count),
             last_access_nanos: AtomicU64::new(nanos_since_epoch(a.last_access)),
+            decayed_through_nanos: AtomicU64::new(nanos_since_epoch(a.last_access)),
         })
     }
 
@@ -95,6 +100,9 @@ impl StoredMemory {
             importance_bits: AtomicU32::new(importance.to_bits()),
             access_count: AtomicU32::new(self.access_count.load(Ordering::Acquire)),
             last_access_nanos: AtomicU64::new(self.last_access_nanos.load(Ordering::Acquire)),
+            decayed_through_nanos: AtomicU64::new(
+                self.decayed_through_nanos.load(Ordering::Acquire),
+            ),
         })
     }
 
@@ -325,6 +333,11 @@ impl ChronoMind {
             .collect();
 
         scored.sort_by(|(_, a), (_, b)| a.total_cmp(b));
+        // A reinsert publishes its new index node before tombstoning the
+        // old one; a search racing that window can see both versions of
+        // one external id. Keep only the best-scoring instance.
+        let mut seen: HashSet<String> = HashSet::with_capacity(scored.len());
+        scored.retain(|(m, _)| seen.insert(m.vector.id.clone()));
         scored.truncate(k);
         Ok(scored)
     }
@@ -398,22 +411,40 @@ impl ChronoMind {
         (1.0 - w) * (distance / 2.0) + w * (1.0 - temporal_relevance)
     }
 
-    /// Decay every memory's importance based on time since last access.
+    /// Decay every memory's importance based on time elapsed while
+    /// unaccessed.
     ///
-    /// Importance is multiplied by `exp(-r * h)` where `r` is the memory's
-    /// effective decay rate and `h` is hours since
-    /// [`last_access`](crate::MemoryAttributes::last_access), then clamped
-    /// to `[0.0, 1.0]`. Lock-free: each update is an atomic CAS loop, and
-    /// the sweep can run concurrently with reads, writes, and other decays.
+    /// Each sweep multiplies importance by `exp(-r * h)` where `r` is the
+    /// memory's effective decay rate and `h` is the hours **since the
+    /// later of the last access and the previous sweep** — sweeps apply
+    /// disjoint intervals, so calling this every minute or once a week
+    /// composes into the same documented curve. A per-memory CAS gate
+    /// ensures concurrent sweeps never apply the same interval twice.
+    /// Lock-free throughout; runs concurrently with reads and writes.
     #[instrument(skip(self))]
     pub fn apply_decay(&self) {
-        let now = SystemTime::now();
+        let now_nanos = nanos_since_epoch(SystemTime::now());
         for stored in self.by_id.pin().values() {
-            let hours = now
-                .duration_since(stored.last_access())
-                .unwrap_or_default()
-                .as_secs_f32()
-                / SECONDS_PER_HOUR;
+            let previous_sweep = stored.decayed_through_nanos.load(Ordering::Acquire);
+            let from = previous_sweep.max(stored.last_access_nanos.load(Ordering::Acquire));
+            if now_nanos <= from {
+                continue;
+            }
+            // Claim the interval (from, now]. A concurrent sweep that loses
+            // this CAS skips the memory; the winner applies the decay.
+            if stored
+                .decayed_through_nanos
+                .compare_exchange(
+                    previous_sweep,
+                    now_nanos,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
+                continue;
+            }
+            let hours = (now_nanos - from) as f32 / 1e9 / SECONDS_PER_HOUR;
             let rate = if stored.decay_rate > 0.0 {
                 stored.decay_rate
             } else {

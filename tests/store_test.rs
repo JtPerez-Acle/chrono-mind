@@ -238,6 +238,41 @@ fn decay_reduces_importance_of_stale_memories() {
 }
 
 #[test]
+fn repeated_decay_sweeps_do_not_compound() {
+    // The decay curve is defined over elapsed time, not sweep count:
+    // sweeping five extra times in quick succession must not re-apply the
+    // interval the first sweep already covered.
+    let store = ChronoMind::new(config(2)).unwrap();
+    let day_ago = SystemTime::now() - Duration::from_secs(24 * 3600);
+    store
+        .insert(Memory::new(
+            Vector::new("m", vec![1.0, 0.0]),
+            MemoryAttributes {
+                importance: 1.0,
+                timestamp: day_ago,
+                last_access: day_ago,
+                ..MemoryAttributes::default()
+            },
+        ))
+        .unwrap();
+
+    store.apply_decay();
+    let after_first = store.get("m").unwrap().attributes.importance;
+    // 24h at the default 0.1/hour: exp(-2.4) ≈ 0.0907.
+    assert!((after_first - (-2.4f32).exp()).abs() < 0.01);
+
+    for _ in 0..5 {
+        store.apply_decay();
+    }
+    let after_six = store.get("m").unwrap().attributes.importance;
+    assert!(
+        (after_six - after_first).abs() / after_first < 0.01,
+        "five immediate re-sweeps changed importance {after_first} -> {after_six}; \
+         decay is compounding per sweep instead of per elapsed time"
+    );
+}
+
+#[test]
 fn decay_leaves_fresh_memories_nearly_intact() {
     let store = ChronoMind::new(config(2)).unwrap();
     let mut fresh = memory("fresh", vec![1.0, 0.0]);
