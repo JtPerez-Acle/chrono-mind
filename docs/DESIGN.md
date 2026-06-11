@@ -1,9 +1,11 @@
 # ChronoMind v0.2 Design Document
 
-**Status:** Implemented (June 2026). All six milestones landed; gates met.
-This document is preserved as the design record — §1–§8 describe the plan as
-approved, Appendix B records where execution deviated and why, Appendix A
-records the audit of the pre-0.2 codebase that motivated the rework.
+**Status:** Implemented (June 2026), then hardened through external review
+and a self-audit. All six milestones landed; gates met. This document is
+preserved as the design record — §1–§8 describe the plan as approved,
+Appendix C records the external-review response and post-review hardening,
+Appendix B records where execution deviated and why, Appendix A records
+the audit of the pre-0.2 codebase that motivated the rework.
 **Goal:** Transform ChronoMind into a portfolio-grade showcase of production Rust: a temporal
 vector store whose headline claim — *lock-free concurrent HNSW* — is actually true, verifiable,
 and benchmarked against its own locked baseline.
@@ -354,6 +356,34 @@ adopted:
    harnesses (index-level and store-level including consolidate at
    quiesce points) run in the normal suite; a coverage-guided cargo-fuzz
    target (`fuzz/fuzz_targets/index_ops.rs`) runs a 90-second smoke in CI.
+
+### Post-review hardening (same cycle)
+
+A self-audit prompted by the review surfaced and fixed two real flaws:
+`apply_decay` compounded per call instead of per elapsed time (fixed with
+a per-record decay high-water mark + CAS gate; regression-tested), and a
+search racing a reinsert could return both versions of one id (fixed by
+post-score dedup). Hardening that followed:
+
+- **Crash-safe snapshots (format v2):** atomic temp-file + fsync + rename
+  writes; CRC32 body checksum verified before deserialization. Previously
+  a crash mid-save destroyed the old snapshot and corruption loaded
+  silently until bincode happened to choke.
+- **Graceful capacity exhaustion:** `Arena::push` and
+  `VectorIndex::insert` return `Option`; the store surfaces
+  `Error::IndexFull` with compaction guidance instead of panicking.
+- **Differential oracle:** arbitrary op sequences against both index
+  implementations must match a brute-force linear-scan model exactly
+  (ids, order, distances) in the exhaustive-ef regime.
+- **MSRV CI job:** the 1.75 badge is compiled against on every push.
+- **External head-to-head** (`benches/external.rs`, feature-gated):
+  vs instant-distance 0.6, hnsw_rs 0.3.4, and usearch 2.25 on identical
+  data and parameters. Verdict over two runs: search throughput at parity
+  with usearch within run noise (recall 0.998), 3–4× ahead of the
+  pure-Rust crates, parallel build within ~20% of usearch. Full table and
+  scope caveats in docs/BENCHMARKS.md. Notable: hnsw_rs — removed from
+  the build in M1 for breaking Windows — returns as a fixed-upstream
+  bench contender.
 
 ## Appendix A — Verified findings this design responds to (June 2026 audit)
 

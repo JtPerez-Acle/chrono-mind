@@ -39,14 +39,34 @@ true instead. See `docs/DESIGN.md` for the full audit and design.
 - `RwLockHnsw`: the same algorithm behind a single lock, kept as the
   correctness reference and benchmark baseline.
 - Verification suite: loom model checks of the CAS and arena protocols,
-  Miri (strict provenance) over the unsafe primitives, seeded recall gates
-  (≥ 0.95 vs brute force) for both indexes, a 768-d connectivity gate, a
-  16-thread/104k-op stress gate with full graph-invariant sweep, and
-  proptest property tests.
+  Miri over the unsafe primitives (strict provenance on the arena, Tree
+  Borrows on epoch-touching code), seeded recall gates (≥ 0.95 vs brute
+  force) for both indexes, a 768-d connectivity gate, a 16-thread/104k-op
+  stress gate with full graph-invariant sweep, a recall-under-churn gate
+  (queries racing live writers must hold ≥ 0.90), reclamation gates under
+  a counting global allocator (epoch garbage provably plateaus and drains;
+  the pinned-guard pathology is measured, not theorized), op-sequence
+  fuzzing with the invariant sweep as oracle (proptest + a cargo-fuzz
+  target), and a differential oracle pinning both index implementations
+  to exact agreement with a linear-scan model in the exhaustive-ef regime.
+- `ShardedRwLockHnsw`: a 16-shard locked baseline — the fair competitor —
+  included in the benchmark matrix.
+- Crash-safe snapshot persistence (format v2): atomic temp-file +
+  fsync + rename writes and a CRC32 body checksum verified before
+  deserialization.
+- Index storage exhaustion surfaces as `Error::IndexFull` instead of a
+  panic (`VectorIndex::insert` returns `Option`).
 - Criterion A/B benchmarks (`cargo bench`): insert / search / mixed
-  workloads across 1–8 threads, lock-free vs baseline.
-- GitHub Actions CI: fmt, clippy `-D warnings`, tests, doc build, loom and
-  Miri jobs, on Windows and Linux.
+  workloads across 1–8 threads, lock-free vs RwLock vs sharded16.
+- External head-to-head (`cargo bench --bench external --features
+  bench-external`) vs instant-distance, hnsw_rs, and usearch: search
+  throughput at parity with usearch within run noise at recall 0.998,
+  3–4× faster than the pure-Rust crates; full table and caveats in
+  docs/BENCHMARKS.md.
+- GitHub Actions CI: fmt, clippy `-D warnings`, tests, doc build
+  (`-D warnings`, `deny(missing_docs)`), loom, two Miri jobs, MSRV 1.75
+  check, aarch64 (weak memory model) test job, ThreadSanitizer on the
+  stress suite, and a fuzz smoke run — Windows and Linux.
 - HNSW correctness fixes over the old code: proper layer assignment
   (`floor(-ln(u)·mL)`, was capped at vector dimensionality), greedy
   descent through all layers (was missing), correct heap orientation (the
@@ -54,10 +74,20 @@ true instead. See `docs/DESIGN.md` for the full audit and design.
   old code could NaN-poison comparisons), Algorithm 4 diversity-aware
   neighbor selection.
 
+### Fixed
+- `apply_decay` no longer compounds under periodic invocation: sweeps now
+  apply disjoint time intervals (per-record high-water mark with a CAS
+  gate), so the decay curve depends on elapsed time, not call frequency.
+  The compounding behavior was inherited from the pre-0.2 code.
+- A search racing a reinsert of the same id can no longer return both
+  versions of one memory (results are deduplicated by external id).
+
 ### Removed
-- `hnsw_rs` dependency (broke Windows builds; wrapped but effectively
-  unused), OpenTelemetry stack, tokio, async-trait, memmap2, parking_lot,
-  and six other unused dependencies.
+- `hnsw_rs` dependency from the build (broke Windows builds at 0.1.19;
+  wrapped but effectively unused — it returns, fixed upstream at 0.3.4,
+  as an optional bench-external dev contender), OpenTelemetry stack,
+  tokio, async-trait, memmap2, parking_lot, and six other unused
+  dependencies.
 - Dead files that were never part of the module tree, two zero-implementor
   `VectorStorage` traits, the unused in-house `TemporalHNSW`, and the
   fabricated benchmark results that described them.

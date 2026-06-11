@@ -90,6 +90,9 @@ Claims about concurrent code are cheap; ChronoMind ships its receipts:
 | **Recall under churn** | Queries racing live concurrent inserts must keep recall ≥ 0.90 against pre-churn ground truth — search *quality* mid-mutation, not just memory safety |
 | **Reclamation gates** | A counting global allocator proves epoch garbage is actually freed (1M churned slices plateau under 16 MB in flight) — and measures the known pathology: a guard pinned forever blocks reclamation until released |
 | **Op-sequence fuzzing** | proptest drives arbitrary insert/remove/search/consolidate sequences with the structural invariant sweep as the oracle; a coverage-guided cargo-fuzz target runs the same harness in CI |
+| **Differential oracle** | Arbitrary op sequences run against BOTH index implementations must match a brute-force linear-scan model *exactly* (ids, order, distances) in the exhaustive-ef regime — lost inserts, ghost tombstones, and distance corruption cannot hide |
+| **Reproducible persistence** | Snapshot saves are atomic (temp file + fsync + rename) with a CRC32 body checksum: corruption is rejected, a crash mid-save can never destroy the previous snapshot — both gated by tests |
+| **MSRV proof** | CI compiles the crate on Rust 1.75 so the badge is verified, not asserted |
 | **ThreadSanitizer** | The stress suite under TSan on real scheduling — the complement to loom's models (suppressions cover only crossbeam-epoch's fence-based sync, never our code) |
 | **ARM (weak memory)** | The full suite on aarch64 Linux in CI — x86's strong ordering can mask acquire/release mistakes; ARM hardware cannot |
 | **CI** | All of the above on every push, Windows and Linux |
@@ -212,8 +215,10 @@ chronomind query --file memories.chrono --vector "0.1,0.2,0.3,0.4" --context con
 chronomind stats --file memories.chrono
 ```
 
-Snapshots are a versioned binary format (`CHRONO1` magic + format byte);
-the index is rebuilt on load.
+Snapshots are a versioned, checksummed binary format (`CHRONO1` magic +
+format byte + CRC32), written atomically — a crash mid-save leaves the
+previous snapshot intact, and corruption is rejected at load rather than
+half-loaded. The index is rebuilt on load.
 
 ## Design notes for the curious
 
@@ -237,7 +242,8 @@ the index is rebuilt on load.
 - **Known limits**: tombstones accumulate until a snapshot reload — and
   since the arena is append-only, every *reinsert of an existing id* also
   burns a fresh arena slot, so update-heavy workloads grow memory until a
-  snapshot reload compacts. Vector data is stored twice (once in the index
+  snapshot reload compacts (at exhaustion, ~16.7M slots, inserts return a
+  typed `Error::IndexFull` rather than panicking). Vector data is stored twice (once in the index
   arena for traversal, once in the store record for retrieval and context
   scans) — 2× vector memory traded for implementation simplicity; halving
   it is roadmap work. The capacity check is approximate under concurrent
