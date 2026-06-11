@@ -1,78 +1,30 @@
 [package]
-name = "vector-store"
-version = "0.1.0"
+name = "chronomind"
+version = "0.2.0"
 edition = "2021"
-description = "High-performance vector storage implementation"
-authors = ["Vector Store Team"]
+rust-version = "1.75"
+description = "A temporal vector store for AI agent memory, with time-aware similarity search"
+authors = ["JtPerez-Acle <jtperez.acle@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/JtPerez-Acle/chrono-mind"
+readme = "README.md"
+keywords = ["vector-store", "hnsw", "temporal", "memory", "ai"]
+categories = ["data-structures", "database-implementations"]
 
 [dependencies]
-# Logging and tracing
-tracing = { version = "0.1", features = ["attributes"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-appender = "0.2"
-
-# Error handling
 thiserror = "1.0"
-anyhow = "1.0"
-
-# Async runtime
-tokio = { version = "1.35", features = ["full"] }
-
-# Serialization
+tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = "1.3"
-
-# Memory mapping
-memmap2 = "0.9"
-
-# Async traits
-async-trait = "0.1"
-
-# Random number generation
-rand = "0.8"
-rand_distr = "0.4"
-
-# Lazy initialization
-once_cell = "1.19.0"
-lazy_static = "1.4"
-
-# Concurrency utilities
-parking_lot = "0.12"
-futures = "0.3"
-rayon = "1.8"
-
-# OpenTelemetry
-opentelemetry = { version = "0.20" }
-opentelemetry_sdk = { version = "0.20" }
-opentelemetry-otlp = { version = "0.13" }
-
-# Fast approximate nearest neighbor search
-hnsw_rs = "0.1.19"  # Pure Rust HNSW implementation
-
-# Command line interface
 clap = { version = "4.4", features = ["derive"] }
 indicatif = "0.17"
+# Needed by the CLI binary to surface `tracing` logs; the library itself only emits spans.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-indicatif = "0.17"
-colored = "2.0"
-proptest = "1.4"
-test-log = "0.2"
-tokio-test = "0.4"
-env_logger = "0.10"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-chrono = "0.4"
-plotters = "0.3"
 tempfile = "3.8"
 
-[[bench]]
-name = "main"
-harness = false
-path = "benches/main.rs"
-
-[[test]]
-name = "integration"
-path = "tests/integration/mod.rs"
+[[bin]]
+name = "chronomind"
+path = "src/main.rs"

@@ -1,347 +1,292 @@
-use std::sync::Arc;
-use std::path::PathBuf;
-use std::fs;
-use std::time::SystemTime;
+﻿//! ChronoMind CLI: save vectors into a snapshot, query it, and inspect stats.
+
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
 use clap::{Parser, Subcommand};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use indicatif::{ProgressBar, ProgressStyle};
-use vector_store::{
-    storage::metrics::CosineDistance,
-    memory::temporal::MemoryStorage,
-    memory::types::{MemoryAttributes, TemporalVector, Vector},
-    core::config::MemoryConfig,
-    storage::persistence::{StorageBackend, MemoryBackend},
+use serde::Deserialize;
+use serde_json::Value;
+
+use chronomind::{
+    load_snapshot, save_snapshot, ChronoMind, Config, Error, Memory, MemoryAttributes, Vector,
 };
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 #[derive(Parser)]
-#[clap(name = "ChronoMind Vector Store")]
-#[clap(author = "Vector Store Team")]
-#[clap(version = VERSION)]
-#[clap(about = "A temporal vector storage solution for AI applications", long_about = None)]
+#[command(name = "chronomind", version, about = "A temporal vector store", long_about = None)]
 struct Cli {
-    #[clap(subcommand)]
+    #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Save vectors to a file
+    /// Import vectors from a JSON file into a snapshot
     Save {
-        /// Input file containing vectors (JSON)
-        #[clap(short, long)]
-        input: String,
+        /// Input JSON file (a vector object or an array of them)
+        #[arg(short, long)]
+        input: PathBuf,
 
-        /// Output file to save vectors
-        #[clap(short, long)]
-        output: String,
+        /// Output snapshot file
+        #[arg(short, long)]
+        output: PathBuf,
 
         /// Vector dimensions
-        #[clap(short, long, default_value = "768")]
+        #[arg(short, long, default_value_t = 768)]
         dimensions: usize,
 
         /// Maximum number of memories
-        #[clap(short, long, default_value = "1000")]
+        #[arg(short, long, default_value_t = 100_000)]
         max_memories: usize,
 
-        /// Normalize vectors (convert to unit vectors)
-        #[clap(short, long)]
+        /// Normalize vectors to unit length before storing
+        #[arg(short, long)]
         normalize: bool,
     },
 
-    /// Query vectors from a file
+    /// Query a snapshot for the nearest memories
     Query {
-        /// File containing saved vectors
-        #[clap(short, long)]
-        file: String,
+        /// Snapshot file to query
+        #[arg(short, long)]
+        file: PathBuf,
 
-        /// Query vector (JSON array format)
-        #[clap(short, long)]
+        /// Query vector: JSON array ("[0.1, 0.2]") or comma-separated ("0.1,0.2")
+        #[arg(short, long)]
         vector: String,
 
         /// Number of results to return
-        #[clap(short, long, default_value = "10")]
+        #[arg(short, long, default_value_t = 10)]
         limit: usize,
 
-        /// Filter by context
-        #[clap(short, long)]
+        /// Restrict results to one context label
+        #[arg(short, long)]
         context: Option<String>,
 
-        /// Normalize query vector (convert to unit vector)
-        #[clap(short, long)]
+        /// Normalize the query vector to unit length
+        #[arg(short, long)]
         normalize: bool,
     },
 
-    /// Get statistics about stored vectors
+    /// Show statistics for a snapshot
     Stats {
-        /// File containing saved vectors
-        #[clap(short, long)]
-        file: String,
+        /// Snapshot file to inspect
+        #[arg(short, long)]
+        file: PathBuf,
     },
 }
 
-#[derive(Serialize, Deserialize)]
+/// One vector record in the JSON input format.
+#[derive(Deserialize)]
 struct VectorInput {
     id: String,
     data: Vec<f32>,
     importance: Option<f32>,
     context: Option<String>,
-    timestamp: Option<String>,
     decay_rate: Option<f32>,
 }
 
-#[tokio::main]
-async fn main() {
-    // Initialize logging
-    tracing_subscriber::fmt::init();
+fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
 
-    // Parse command line arguments
     let cli = Cli::parse();
-
-    // Process commands
     let result = match cli.command {
-        Commands::Save { input, output, dimensions, max_memories, normalize } => {
-            save_vectors(input, output, dimensions, max_memories, normalize).await
-        },
-        Commands::Query { file, vector, limit, context, normalize } => {
-            query_vectors(file, vector, limit, context, normalize).await
-        },
-        Commands::Stats { file } => {
-            show_stats(file).await
-        },
+        Commands::Save {
+            input,
+            output,
+            dimensions,
+            max_memories,
+            normalize,
+        } => save_command(&input, &output, dimensions, max_memories, normalize),
+        Commands::Query {
+            file,
+            vector,
+            limit,
+            context,
+            normalize,
+        } => query_command(&file, &vector, limit, context.as_deref(), normalize),
+        Commands::Stats { file } => stats_command(&file),
     };
 
-    // Handle errors with user-friendly messages
-    if let Err(err) = result {
-        eprintln!("Error: {}", err);
-
-        // Provide more specific guidance based on error type
-        if err.to_string().contains("No such file or directory") {
-            eprintln!("The specified file could not be found. Please check the path and try again.");
-        } else if err.to_string().contains("InvalidVectorData") {
-            eprintln!("The vector data is invalid. Please ensure it contains valid floating-point numbers.");
-        } else if err.to_string().contains("InvalidDimensions") {
-            eprintln!("The vector dimensions do not match the expected dimensions. Please check your configuration.");
-        } else if err.to_string().contains("permission denied") {
-            eprintln!("Permission denied when accessing the file. Please check your file permissions.");
-        } else if err.to_string().contains("Invalid JSON") {
-            eprintln!("The input file contains invalid JSON. Please check the file format.");
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("Error: {err}");
+            eprint_hint(&err);
+            ExitCode::FAILURE
         }
-
-        std::process::exit(1);
     }
 }
 
-async fn save_vectors(input: String, output: String, dimensions: usize, max_memories: usize, normalize: bool) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Saving vectors to {}", output);
-    if normalize {
-        println!("Vector normalization enabled");
+fn eprint_hint(err: &Error) {
+    match err {
+        Error::Io(_) => {
+            eprintln!("Check that the file path exists and that you have permission to access it.")
+        }
+        Error::InvalidDimensions { got, expected } => eprintln!(
+            "The vector has {got} dimensions but the store expects {expected}. \
+             Pass --dimensions {got} when saving, or fix the input."
+        ),
+        Error::InvalidVector(_) => {
+            eprintln!("Ensure every vector component is a finite floating-point number.")
+        }
+        Error::InvalidSnapshot(_) => eprintln!(
+            "The file is not a ChronoMind snapshot (or was written by an \
+             incompatible version)."
+        ),
+        _ => {}
     }
+}
 
-    // Create configuration
-    let config = MemoryConfig {
-        max_dimensions: dimensions,
+fn save_command(
+    input: &Path,
+    output: &Path,
+    dimensions: usize,
+    max_memories: usize,
+    normalize: bool,
+) -> chronomind::Result<()> {
+    let config = Config {
+        dimensions,
         max_memories,
-        ..MemoryConfig::default()
+        ..Config::default()
+    };
+    let mut store = ChronoMind::new(config)?;
+
+    let raw = std::fs::read_to_string(input)?;
+    let parsed: Value = serde_json::from_str(&raw)?;
+    let records: Vec<VectorInput> = match parsed {
+        Value::Object(_) => vec![serde_json::from_value(parsed)?],
+        Value::Array(_) => serde_json::from_value(parsed)?,
+        _ => {
+            return Err(Error::InvalidVector(
+                "input must be a JSON object or array of objects".into(),
+            ))
+        }
     };
 
-    // Create storage backend
-    let mut backend = MemoryBackend::new(config);
-    backend.init().await?;
-
-    // Read input file
-    let input_data = fs::read_to_string(input)?;
-    let input_json: Value = serde_json::from_str(&input_data)?;
-
-    // Process input data
-    match input_json {
-        // Single vector
-        Value::Object(_) => {
-            let mut vector_input: VectorInput = serde_json::from_str(&input_data)?;
-            if normalize {
-                normalize_vector(&mut vector_input.data);
-            }
-            save_single_vector(&mut backend, vector_input).await?;
-        },
-        // Array of vectors
-        Value::Array(vectors) => {
-            let total_vectors = vectors.len();
-            let pb = ProgressBar::new(total_vectors as u64);
-            pb.set_style(ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} vectors ({eta})")
-                .unwrap()
-                .progress_chars("#>-"));
-
-            for (i, vector_value) in vectors.iter().enumerate() {
-                let vector_str = vector_value.to_string();
-                let mut vector_input: VectorInput = serde_json::from_str(&vector_str)?;
-                if normalize {
-                    normalize_vector(&mut vector_input.data);
-                }
-                save_single_vector(&mut backend, vector_input).await?;
-                pb.set_position((i + 1) as u64);
-            }
-
-            pb.finish_with_message("All vectors saved successfully");
-        },
-        _ => return Err("Invalid input format. Expected JSON object or array.".into()),
+    let bar = progress_bar(records.len() as u64, "importing");
+    for record in records {
+        let mut data = record.data;
+        if normalize {
+            normalize_vector(&mut data);
+        }
+        store.insert(Memory::new(
+            Vector::new(record.id, data),
+            MemoryAttributes {
+                importance: record.importance.unwrap_or(0.5),
+                context: record.context.unwrap_or_else(|| "default".into()),
+                decay_rate: record.decay_rate.unwrap_or(0.0),
+                ..MemoryAttributes::default()
+            },
+        ))?;
+        bar.inc(1);
     }
+    bar.finish_and_clear();
 
-    // Save to file
-    let output_path = PathBuf::from(output);
-    backend.backup(output_path).await?;
-
-    println!("Vectors saved successfully");
+    save_snapshot(&store, output)?;
+    println!("Saved {} memories to {}", store.len(), output.display());
     Ok(())
 }
 
-async fn save_single_vector(backend: &mut MemoryBackend, input: VectorInput) -> Result<(), Box<dyn std::error::Error>> {
-    // Create vector
-    let vector = Vector::new(
-        input.id,
-        input.data,
-    );
+fn query_command(
+    file: &Path,
+    vector: &str,
+    limit: usize,
+    context: Option<&str>,
+    normalize: bool,
+) -> chronomind::Result<()> {
+    let store = load_snapshot(file)?;
 
-    // Create temporal vector
-    let temporal = TemporalVector::new(
-        vector,
-        MemoryAttributes {
-            timestamp: SystemTime::now(),
-            importance: input.importance.unwrap_or(0.5),
-            context: input.context.unwrap_or_else(|| "default".to_string()),
-            decay_rate: input.decay_rate.unwrap_or(0.1),
-            relationships: Vec::new(),
-            access_count: 0,
-            last_access: SystemTime::now(),
-        },
-    );
-
-    // Save to backend
-    backend.save(&temporal).await?;
-
-    Ok(())
-}
-
-async fn query_vectors(file: String, vector_str: String, limit: usize, context: Option<String>, normalize: bool) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Querying vectors from {}", file);
-
-    // Parse query vector
-    let mut vector_data: Vec<f32> = parse_vector_string(&vector_str)?;
-
-    // Normalize the query vector if requested
+    let mut query = parse_vector(vector)?;
     if normalize {
-        println!("Normalizing query vector");
-        normalize_vector(&mut vector_data);
+        normalize_vector(&mut query);
     }
 
-    // Load from file
-    let file_path = PathBuf::from(file);
-    let config = MemoryConfig::default();
-    let mut backend = MemoryBackend::new(config);
-    backend.restore(file_path).await?;
-
-    // Create memory storage for search
-    let metric = Arc::new(CosineDistance::new());
-    let mut storage = MemoryStorage::new(backend.get_config().clone(), metric);
-
-    // Load memories from backend
-    let memories = backend.list_all().await?;
-    let total_memories = memories.len();
-
-    let pb = ProgressBar::new(total_memories as u64);
-    pb.set_style(ProgressStyle::default_bar()
-        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] Loading {pos}/{len} memories ({eta})")
-        .unwrap()
-        .progress_chars("#>-"));
-
-    for (i, memory) in memories.iter().enumerate() {
-        storage.save_memory(memory.clone()).await?;
-        pb.set_position((i + 1) as u64);
-    }
-
-    pb.finish_with_message("All memories loaded successfully");
-
-    // Perform search
-    let results = if let Some(ctx) = context {
-        storage.search_by_context(&ctx, &vector_data, limit).await?
-    } else {
-        storage.search_similar(&vector_data, limit).await?
+    let results = match context {
+        Some(ctx) => store.search_in_context(ctx, &query, limit)?,
+        None => store.search(&query, limit)?,
     };
 
-    // Display results
-    println!("Found {} results:", results.len());
-    for (i, (memory, score)) in results.iter().enumerate() {
-        println!("{}. ID: {}, Score: {:.4}, Importance: {:.2}, Context: {}",
-            i + 1,
+    if results.is_empty() {
+        println!("No results.");
+        return Ok(());
+    }
+    println!("Found {} result(s):", results.len());
+    for (rank, (memory, score)) in results.iter().enumerate() {
+        println!(
+            "{}. id: {}  score: {:.4}  importance: {:.2}  context: {}",
+            rank + 1,
             memory.vector.id,
             score,
             memory.attributes.importance,
-            memory.attributes.context
+            memory.attributes.context,
         );
     }
-
     Ok(())
 }
 
-async fn show_stats(file: String) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Showing statistics for {}", file);
+fn stats_command(file: &Path) -> chronomind::Result<()> {
+    let store = load_snapshot(file)?;
+    let stats = store.stats();
 
-    // Load from file
-    let file_path = PathBuf::from(file);
-    let config = MemoryConfig::default();
-    let mut backend = MemoryBackend::new(config);
-    backend.restore(file_path).await?;
-
-    // Get stats
-    let stats = backend.get_stats().await?;
-
-    // Display stats
-    println!("Total memories: {}", stats.total_memories);
-    println!("Total size: {} bytes", stats.total_size);
-    println!("Average vector size: {:.2} dimensions", stats.avg_vector_size);
+    println!("Total memories:     {}", stats.total_memories);
+    println!("Total components:   {}", stats.total_components);
+    println!("Capacity used:      {:.1}%", stats.capacity_used * 100.0);
     println!("Average importance: {:.4}", stats.average_importance);
 
-    println!("\nContext distribution:");
-    for (context, count) in stats.context_distribution {
-        println!("  {}: {}", context, count);
+    if !stats.context_distribution.is_empty() {
+        println!("\nContext distribution:");
+        let mut contexts: Vec<_> = stats.context_distribution.iter().collect();
+        contexts.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        for (context, count) in contexts {
+            println!("  {context}: {count}");
+        }
     }
 
-    println!("\nMost connected memories:");
-    for (i, id) in stats.most_connected_memories.iter().enumerate() {
-        println!("  {}. {}", i + 1, id);
+    if !stats.most_referenced.is_empty() {
+        println!("\nMost referenced memories:");
+        for (rank, (id, count)) in stats.most_referenced.iter().enumerate() {
+            println!("  {}. {id} ({count} references)", rank + 1);
+        }
     }
-
     Ok(())
 }
 
-fn parse_vector_string(vector_str: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    // Handle JSON array format: [0.1, 0.2, 0.3]
-    if vector_str.starts_with('[') && vector_str.ends_with(']') {
-        let vector: Vec<f32> = serde_json::from_str(vector_str)?;
-        return Ok(vector);
+fn parse_vector(input: &str) -> chronomind::Result<Vec<f32>> {
+    let trimmed = input.trim();
+    if trimmed.starts_with('[') {
+        return Ok(serde_json::from_str(trimmed)?);
     }
-
-    // Handle comma-separated format: 0.1,0.2,0.3
-    let vector: Result<Vec<f32>, _> = vector_str
+    trimmed
         .split(',')
-        .map(|s| s.trim().parse::<f32>())
-        .collect();
-
-    Ok(vector?)
+        .map(|part| {
+            part.trim()
+                .parse::<f32>()
+                .map_err(|e| Error::InvalidVector(format!("bad component {part:?}: {e}")))
+        })
+        .collect()
 }
 
-/// Normalize a vector to unit length (L2 norm)
-fn normalize_vector(vector: &mut Vec<f32>) {
-    // Calculate the L2 norm (Euclidean length) of the vector
-    let norm: f32 = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
-
-    // Avoid division by zero
+fn normalize_vector(vector: &mut [f32]) {
+    let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
-        // Divide each component by the norm to get a unit vector
         for component in vector.iter_mut() {
             *component /= norm;
         }
     }
+}
+
+fn progress_bar(len: u64, message: &'static str) -> ProgressBar {
+    let bar = ProgressBar::new(len);
+    bar.set_style(
+        ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .expect("static template is valid")
+            .progress_chars("#>-"),
+    );
+    bar.set_message(message);
+    bar
 }

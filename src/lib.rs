@@ -1,97 +1,52 @@
-//! Vector Store - A high-performance vector storage implementation
-//! 
-//! This crate provides a sophisticated vector storage system with temporal memory management,
-//! designed for AI applications. It features memory consolidation, decay simulation, and
-//! relationship tracking.
+//! ChronoMind — a temporal vector store for AI agent memory.
+//!
+//! ChronoMind stores embedding vectors together with temporal attributes
+//! (creation time, importance, decay rate, access history) and ranks search
+//! results by a documented combination of geometric distance and recency.
+//! Memories decay, can be consolidated when near-duplicate, and can be
+//! linked into relationship graphs.
+//!
+//! The library is fully synchronous: there is no async runtime dependency,
+//! and a store can be shared across threads once the concurrent index lands
+//! (see `docs/DESIGN.md` for the roadmap).
+//!
+//! # Example
+//!
+//! ```
+//! use chronomind::{ChronoMind, Config, Memory, MemoryAttributes, Vector};
+//!
+//! # fn main() -> chronomind::Result<()> {
+//! let config = Config::builder().dimensions(4).build()?;
+//! let mut store = ChronoMind::new(config)?;
+//!
+//! store.insert(Memory::new(
+//!     Vector::new("first", vec![0.1, 0.2, 0.3, 0.4]),
+//!     MemoryAttributes {
+//!         importance: 0.8,
+//!         context: "demo".into(),
+//!         ..MemoryAttributes::default()
+//!     },
+//! ))?;
+//!
+//! let results = store.search(&[0.1, 0.2, 0.3, 0.4], 1)?;
+//! assert_eq!(results[0].0.vector.id, "first");
+//! # Ok(())
+//! # }
+//! ```
 
-// Core modules
-pub mod core;
-pub mod memory;
-pub mod storage;
-pub mod utils;
+#![warn(missing_docs)]
+#![warn(rust_2018_idioms)]
 
-pub use crate::{
-    core::{
-        config::MemoryConfig,
-        error::{MemoryError, Result},
-    },
-    memory::{
-        temporal::MemoryStorage,
-        types::{MemoryAttributes, TemporalVector, Vector, MemoryStats},
-    },
-    storage::{
-        metrics::CosineDistance,
-        hnsw::TemporalHNSW,
-    },
-};
+pub mod config;
+pub mod error;
+pub mod metric;
+pub mod persistence;
+pub mod store;
+pub mod types;
 
-use std::sync::Arc;
-
-/// Initialize the vector store with default configuration
-pub fn init() -> Result<MemoryStorage> {
-    init_with_config(MemoryConfig::default())
-}
-
-/// Initialize the vector store with custom configuration
-pub fn init_with_config(config: MemoryConfig) -> Result<MemoryStorage> {
-    // Validate configuration
-    if let Err(e) = config.validate() {
-        return Err(MemoryError::ConfigError(e.to_string()));
-    }
-    
-    // Initialize storage
-    let metric = Arc::new(CosineDistance::new());
-    let memory_config = config;
-    Ok(MemoryStorage::new(memory_config, metric))
-}
-
-/// Initialize memory store with custom distance metric
-pub async fn init_memory_store(
-    distance_metric: Arc<dyn crate::storage::metrics::DistanceMetric + Send + Sync>,
-) -> Result<MemoryStorage> {
-    let config = MemoryConfig::default();
-    config.validate()?;
-    let memory_config = config;
-    Ok(MemoryStorage::new(memory_config, distance_metric))
-}
-
-/// Save a memory to the store
-pub async fn save_memory(store: &mut MemoryStorage, memory: TemporalVector) -> Result<()> {
-    store.save_memory(memory).await
-}
-
-/// Get a memory from the store by ID
-pub async fn get_memory(store: &MemoryStorage, id: &str) -> Result<Option<TemporalVector>> {
-    store.get_memory(id).await
-}
-
-/// Search for similar memories
-pub async fn search_similar(
-    store: &MemoryStorage,
-    query: &[f32],
-    limit: usize,
-) -> Result<Vec<(TemporalVector, f32)>> {
-    store.search_similar(query, limit).await
-}
-
-/// Update memory decay
-pub async fn update_memory_decay(store: &mut MemoryStorage) -> Result<()> {
-    store.update_memory_decay().await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::config::MemoryConfig;
-
-    #[test]
-    fn test_init() {
-        assert!(init().is_ok());
-    }
-
-    #[test]
-    fn test_custom_config() {
-        let config = MemoryConfig::default();
-        assert!(init_with_config(config).is_ok());
-    }
-}
+pub use config::{Config, ConfigBuilder, IndexParams};
+pub use error::{Error, Result};
+pub use metric::{CosineDistance, DistanceMetric};
+pub use persistence::{load_snapshot, save_snapshot};
+pub use store::ChronoMind;
+pub use types::{ContextSummary, Memory, MemoryAttributes, MemoryStats, Vector};
