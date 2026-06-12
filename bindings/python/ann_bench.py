@@ -124,20 +124,38 @@ class HnswLib:
         return labels[0]
 
 
+class Faiss:
+    name = "faiss-hnsw"
+
+    def __init__(self, dim, m, efc):
+        import faiss
+
+        # Cosine via inner product on unit-normalized vectors (FAISS does not
+        # normalize itself, so the adapter does it in fit/query).
+        self.idx = faiss.IndexHNSWFlat(dim, m, faiss.METRIC_INNER_PRODUCT)
+        self.idx.hnsw.efConstruction = efc
+
+    def fit(self, X):
+        xn = X / np.linalg.norm(X, axis=1, keepdims=True)
+        self.idx.add(np.ascontiguousarray(xn, dtype=np.float32))
+
+    def set_ef(self, ef):
+        self.idx.hnsw.efSearch = ef
+
+    def query(self, v, k):
+        vn = (v / np.linalg.norm(v)).reshape(1, -1).astype(np.float32)
+        _, ids = self.idx.search(vn, k)
+        return ids[0]
+
+
 def available():
     algos = [ChronoMind]
-    try:
-        import usearch  # noqa: F401
-
-        algos.append(USearch)
-    except ImportError:
-        pass
-    try:
-        import hnswlib  # noqa: F401
-
-        algos.append(HnswLib)
-    except ImportError:
-        pass
+    for mod, cls in (("usearch", USearch), ("hnswlib", HnswLib), ("faiss", Faiss)):
+        try:
+            __import__(mod)
+            algos.append(cls)
+        except ImportError:
+            pass
     return algos
 
 
