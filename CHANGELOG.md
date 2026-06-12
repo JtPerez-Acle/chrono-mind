@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-06-12
+
+First published release. 0.2.0 was the internal ground-up rebuild (below);
+0.2.5 is that work hardened, benchmarked against the field, and shipped.
+
+### Added
+- **Python bindings** (`bindings/python/`): a maturin/PyO3 crate exposing
+  the lock-free index to Python for benchmarking. Deliberately not a
+  workspace member — its own Cargo.lock, so the pyo3/numpy tree never
+  reaches the published library or its CI.
+- **Real-dataset benchmark driver** (`bindings/python/ann_bench.py`): loads
+  ann-benchmarks HDF5 datasets and traces recall@k vs single-thread QPS
+  against bundled ground truth, for chronomind and whichever of usearch /
+  FAISS / hnswlib are importable.
+- **Reads-under-writes concurrency benchmark** (`benches/concurrency.rs`,
+  behind `bench-external`): read throughput and p99 latency, idle vs under
+  concurrent writers, for chronomind vs sharded16 vs one RwLock vs usearch —
+  the scenario the lock-free design exists for.
+- Measured competitive position folded into the README and
+  `docs/BENCHMARKS.md`, with per-dataset results under
+  `bindings/python/results/`: recall matches usearch and FAISS on GloVe-100
+  and NYTimes-256; single-thread search tracks usearch within ~10%; build
+  is 12–24× slower (structural); under concurrent writes chronomind retains
+  ~65% read throughput (matching usearch) where a single RwLock collapses to
+  1% with p99 up 334×.
+
+### Changed
+- **Cosine distance normalizes once.** `DistanceMetric` gains
+  `preprocess` + `distance_prepared` (defaults: identity + `distance`);
+  `CosineDistance` unit-normalizes at insert/query so the hot path is a bare
+  dot product instead of recomputing both operands' norms per call. Both
+  indexes store the prepared vector; the differential oracle mirrors the
+  same arithmetic so its exact-rank check still holds.
+- **MSRV 1.75 → 1.82.** The committed `Cargo.lock` is format v4, which Cargo
+  cannot parse before 1.78; 1.82 is the floor CI now verifies. The library
+  code itself still compiles far lower (papaya and seize need only 1.72).
+
+### Fixed
+- First-run CI: the ThreadSanitizer suppression file targeted
+  crossbeam-epoch (which is TSan-clean here); the real false positives come
+  from seize's `sys_membarrier` reclamation (reached via papaya), which TSan
+  cannot model. Retargeted the suppressions to seize's collector/membarrier
+  with the full rationale; chronomind's own code remains unsuppressed.
+- Public docs on `ShardedRwLockHnsw` linked the private `SHARDS` const via an
+  intra-doc link, failing `cargo doc -D warnings`. Demoted to a code span.
+
 ## [0.2.0] - 2026-06-11
 
 Ground-up rework. The previous codebase claimed to be lock-free and

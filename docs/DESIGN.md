@@ -44,7 +44,7 @@ must pass before moving to the next phase.
 | Decision | Resolution | Rationale |
 |---|---|---|
 | Crate/lib/bin name | `chronomind` | Matches repo identity; `vector-store` is generic and squatted territory. Check crates.io availability at publish time; the repo does not depend on it. |
-| Version | `0.2.0` | Cargo.toml is the source of truth (currently 0.1.0). Commit-message versions (v0.4/v0.5) were never released; do not honor them. |
+| Version | `0.2.0` (rebuild) → `0.2.5` (first publish) | Cargo.toml is the source of truth. 0.2.0 was the internal rebuild milestone; the first crates.io release is 0.2.5, after hardening + field benchmarks (see CHANGELOG). Commit-message versions (v0.4/v0.5) were never released; do not honor them. |
 | License | Dual `MIT OR Apache-2.0` | Owner wants MIT; dual licensing is the Rust-ecosystem convention and includes MIT. Add `LICENSE-MIT` + `LICENSE-APACHE`, delete single `LICENSE`, update `Cargo.toml` `license` field and README badge. |
 | Async | **Remove entirely.** Core library is synchronous. | Every `.await` in the current code is fake — there is zero awaited IO. The store is in-memory compute. A lock-free `Send + Sync` store is *better* without async: callers on any runtime can use it directly. Removing tokio also cuts compile time dramatically. Document this reasoning in the README (it is itself a portfolio point). |
 | OpenTelemetry | **Remove** (`opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`). Keep `tracing` for structured logging. | OTel is heavyweight ceremony with no consumer here. `tracing` spans give the same observability story at a fraction of the cost. |

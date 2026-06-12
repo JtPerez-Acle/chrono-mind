@@ -4,7 +4,7 @@
 # maturin; depends on chronomind by path.
 [package]
 name = "chronomind-py"
-version = "0.2.0"
+version = "0.2.5"
 edition = "2021"
 publish = false
 

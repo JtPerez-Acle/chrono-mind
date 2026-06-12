@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "chronomind"
-version = "0.2.0"
+version = "0.2.5"
 description = "Python bindings for the ChronoMind lock-free HNSW index (benchmark harness)"
 requires-python = ">=3.9"
 
