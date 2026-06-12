@@ -114,7 +114,10 @@ impl RwLockHnsw {
 
         for &ep in entry_points {
             if visited.insert(ep) {
-                let d = TotalF32(self.metric.distance(&nodes[ep as usize].vector, query));
+                let d = TotalF32(
+                    self.metric
+                        .distance_prepared(&nodes[ep as usize].vector, query),
+                );
                 frontier.push(Reverse((d, ep)));
                 best.push((d, ep));
             }
@@ -135,7 +138,7 @@ impl RwLockHnsw {
                 }
                 let d = TotalF32(
                     self.metric
-                        .distance(&nodes[neighbor as usize].vector, query),
+                        .distance_prepared(&nodes[neighbor as usize].vector, query),
                 );
                 let admit = best.len() < ef || d < best.peek().expect("non-empty").0;
                 if admit {
@@ -186,7 +189,7 @@ impl RwLockHnsw {
             let diverse = selected.iter().all(|&(_, chosen)| {
                 let dist_to_chosen = self
                     .metric
-                    .distance(candidate_vector, &nodes[chosen as usize].vector);
+                    .distance_prepared(candidate_vector, &nodes[chosen as usize].vector);
                 dist_to_query.0 < dist_to_chosen
             });
             if diverse {
@@ -220,7 +223,7 @@ impl RwLockHnsw {
                 (
                     TotalF32(
                         self.metric
-                            .distance(&inner.nodes[n as usize].vector, node_vector),
+                            .distance_prepared(&inner.nodes[n as usize].vector, node_vector),
                     ),
                     n,
                 )
@@ -234,6 +237,8 @@ impl RwLockHnsw {
 
 impl VectorIndex for RwLockHnsw {
     fn insert(&self, vector: &[f32]) -> Option<u32> {
+        // Preprocess once; stored vectors and traversal use the prepared form.
+        let vector = self.metric.preprocess(vector);
         let mut inner = self.inner.write().expect("index lock poisoned");
         let inner = &mut *inner;
         if inner.nodes.len() >= u32::MAX as usize {
@@ -246,7 +251,7 @@ impl VectorIndex for RwLockHnsw {
         let Some(entry) = inner.entry else {
             // First node: it becomes the entry point at its own top layer.
             inner.nodes.push(Node {
-                vector: vector.into(),
+                vector: vector.as_slice().into(),
                 neighbors: vec![Vec::new(); top_layer + 1],
                 deleted: false,
             });
@@ -261,7 +266,7 @@ impl VectorIndex for RwLockHnsw {
         // participates in, descending greedily through the layers above.
         let mut ep = entry;
         for layer in (top_layer + 1..=entry_layer).rev() {
-            ep = self.descend_layer(&inner.nodes, vector, ep, layer);
+            ep = self.descend_layer(&inner.nodes, &vector, ep, layer);
         }
 
         let mut entry_points = vec![ep];
@@ -269,7 +274,7 @@ impl VectorIndex for RwLockHnsw {
         for layer in (0..=top_layer.min(entry_layer)).rev() {
             let candidates = self.search_layer(
                 &inner.nodes,
-                vector,
+                &vector,
                 &entry_points,
                 self.params.ef_construction,
                 layer,
@@ -287,7 +292,7 @@ impl VectorIndex for RwLockHnsw {
             neighbors[*layer] = selected.clone();
         }
         inner.nodes.push(Node {
-            vector: vector.into(),
+            vector: vector.as_slice().into(),
             neighbors,
             deleted: false,
         });
@@ -327,12 +332,15 @@ impl VectorIndex for RwLockHnsw {
             return Vec::new();
         }
 
+        // Prepare the query once; stored vectors are already prepared.
+        let query = self.metric.preprocess(query);
+
         let mut ep = entry;
         for layer in (1..=inner.nodes[entry as usize].top_layer()).rev() {
-            ep = self.descend_layer(&inner.nodes, query, ep, layer);
+            ep = self.descend_layer(&inner.nodes, &query, ep, layer);
         }
 
-        self.search_layer(&inner.nodes, query, &[ep], ef, 0)
+        self.search_layer(&inner.nodes, &query, &[ep], ef, 0)
             .into_iter()
             .filter(|&(_, id)| !inner.nodes[id as usize].deleted)
             .map(|(d, id)| (id, d.0))

@@ -194,9 +194,14 @@ proptest! {
             .collect();
 
         for q in &queries {
+            // Mirror the index exactly: it stores preprocess(v) and queries
+            // with preprocess(q), comparing via distance_prepared. Using the
+            // same arithmetic keeps the id ordering bit-identical, so the
+            // exact-rank assertion below is not tripped by FP near-ties.
+            let qn = metric.preprocess(q);
             let mut expected: Vec<(f32, u32)> = live
                 .iter()
-                .map(|(h, v)| (metric.distance(v, q), *h))
+                .map(|(h, v)| (metric.distance_prepared(&metric.preprocess(v), &qn), *h))
                 .collect();
             expected.sort_by(|a, b| a.0.total_cmp(&b.0));
 

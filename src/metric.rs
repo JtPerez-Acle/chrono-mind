@@ -23,6 +23,28 @@ pub trait DistanceMetric: Send + Sync {
 
     /// Short identifier for diagnostics.
     fn name(&self) -> &'static str;
+
+    /// Preprocess a vector once — at insert and at query time — so the hot
+    /// path can skip per-call work. The index stores the preprocessed form
+    /// and feeds preprocessed queries to [`distance_prepared`].
+    ///
+    /// Default: identity. [`CosineDistance`] overrides this to unit-normalize,
+    /// turning each distance into a bare dot product.
+    ///
+    /// [`distance_prepared`]: DistanceMetric::distance_prepared
+    fn preprocess(&self, v: &[f32]) -> Vec<f32> {
+        v.to_vec()
+    }
+
+    /// Distance between two already-[`preprocess`]ed vectors. Must agree with
+    /// [`distance`] up to floating-point rounding. Default: defer to
+    /// [`distance`].
+    ///
+    /// [`preprocess`]: DistanceMetric::preprocess
+    /// [`distance`]: DistanceMetric::distance
+    fn distance_prepared(&self, a: &[f32], b: &[f32]) -> f32 {
+        self.distance(a, b)
+    }
 }
 
 /// Cosine distance with SIMD acceleration.
@@ -93,6 +115,51 @@ impl CosineDistance {
         (dot_s, na_s, nb_s)
     }
 
+    /// Dot product only (single pass), scalar.
+    fn dot_scalar(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+    }
+
+    /// AVX2+FMA dot product.
+    ///
+    /// # Safety
+    /// Caller must ensure the CPU supports AVX2 and FMA and `a.len() == b.len()`.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
+        let mut acc = _mm256_setzero_ps();
+        let chunks = a.len() / 8 * 8;
+        for i in (0..chunks).step_by(8) {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            acc = _mm256_fmadd_ps(va, vb, acc);
+        }
+        let lo = _mm256_castps256_ps128(acc);
+        let hi = _mm256_extractf128_ps(acc, 1);
+        let sum128 = _mm_add_ps(lo, hi);
+        let sum64 = _mm_add_ps(sum128, _mm_movehl_ps(sum128, sum128));
+        let sum32 = _mm_add_ss(sum64, _mm_shuffle_ps(sum64, sum64, 1));
+        let mut s = _mm_cvtss_f32(sum32);
+        for i in chunks..a.len() {
+            s += *a.get_unchecked(i) * *b.get_unchecked(i);
+        }
+        s
+    }
+
+    /// Dispatched dot product: AVX2+FMA when available, scalar otherwise.
+    /// Callers must pass equal-length slices.
+    #[inline]
+    fn dot(a: &[f32], b: &[f32]) -> f32 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                // SAFETY: features verified here; lengths equal by contract.
+                return unsafe { Self::dot_avx2(a, b) };
+            }
+        }
+        Self::dot_scalar(a, b)
+    }
+
     fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
         if a.is_empty() || a.len() != b.len() {
             return None;
@@ -133,6 +200,27 @@ impl DistanceMetric for CosineDistance {
 
     fn name(&self) -> &'static str {
         "cosine"
+    }
+
+    /// Unit-normalize, so stored vectors and queries can be compared with a
+    /// bare dot product. A degenerate (zero / near-zero) vector has no
+    /// direction and is left unchanged rather than producing NaNs.
+    fn preprocess(&self, v: &[f32]) -> Vec<f32> {
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm <= f32::EPSILON {
+            return v.to_vec();
+        }
+        v.iter().map(|x| x / norm).collect()
+    }
+
+    /// Distance between two unit vectors: `1 - dot`. Skips the per-call norm
+    /// recomputation that [`distance`](DistanceMetric::distance) must do for
+    /// arbitrary inputs — the whole point of preprocessing.
+    fn distance_prepared(&self, a: &[f32], b: &[f32]) -> f32 {
+        if a.is_empty() || a.len() != b.len() {
+            return 2.0;
+        }
+        (1.0 - Self::dot(a, b)).clamp(0.0, 2.0)
     }
 }
 

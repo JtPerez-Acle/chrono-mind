@@ -154,7 +154,7 @@ impl LockFreeHnsw {
             if layer > node.top_layer || !visited.insert(ep) {
                 continue;
             }
-            let d = TotalF32(self.metric.distance(&node.vector, query));
+            let d = TotalF32(self.metric.distance_prepared(&node.vector, query));
             frontier.push(Reverse((d, ep)));
             best.push((d, ep));
         }
@@ -178,7 +178,7 @@ impl LockFreeHnsw {
                 let Some(neighbor_node) = self.node(neighbor) else {
                     continue;
                 };
-                let d = TotalF32(self.metric.distance(&neighbor_node.vector, query));
+                let d = TotalF32(self.metric.distance_prepared(&neighbor_node.vector, query));
                 let admit = best.len() < ef || d < best.peek().expect("non-empty").0;
                 if admit {
                     frontier.push(Reverse((d, neighbor)));
@@ -219,7 +219,7 @@ impl LockFreeHnsw {
                 };
                 let dist_to_chosen = self
                     .metric
-                    .distance(&candidate_node.vector, &chosen_node.vector);
+                    .distance_prepared(&candidate_node.vector, &chosen_node.vector);
                 dist_to_query.0 < dist_to_chosen
             });
             if diverse {
@@ -266,7 +266,10 @@ impl LockFreeHnsw {
                 .filter_map(|&id| {
                     let node = self.node(id)?;
                     Some((
-                        TotalF32(self.metric.distance(&node.vector, &from_node.vector)),
+                        TotalF32(
+                            self.metric
+                                .distance_prepared(&node.vector, &from_node.vector),
+                        ),
                         id,
                     ))
                 })
@@ -370,9 +373,12 @@ impl LockFreeHnsw {
 
 impl VectorIndex for LockFreeHnsw {
     fn insert(&self, vector: &[f32]) -> Option<u32> {
+        // Preprocess once; stored vectors and the traversal below all use the
+        // prepared form so every distance is a bare dot product.
+        let vector = self.metric.preprocess(vector);
         let top_layer = self.random_layer();
         let id = self.nodes.push(Node {
-            vector: vector.into(),
+            vector: vector.as_slice().into(),
             top_layer,
             deleted: AtomicBool::new(false),
             layers: (0..=top_layer).map(|_| NeighborList::new()).collect(),
@@ -407,14 +413,14 @@ impl VectorIndex for LockFreeHnsw {
         // Phase 1 (read-only): collect neighbor selections per layer.
         let mut ep = entry_id;
         for layer in (top_layer + 1..=entry_top).rev() {
-            ep = self.descend_layer(vector, ep, layer, &guard);
+            ep = self.descend_layer(&vector, ep, layer, &guard);
         }
 
         let mut entry_points = vec![ep];
         let mut selected_per_layer: Vec<(usize, Vec<u32>)> = Vec::new();
         for layer in (0..=top_layer.min(entry_top)).rev() {
             let candidates = self.search_layer(
-                vector,
+                &vector,
                 &entry_points,
                 self.params.ef_construction,
                 layer,
@@ -469,12 +475,15 @@ impl VectorIndex for LockFreeHnsw {
             return Vec::new();
         };
 
+        // Prepare the query once; the stored vectors are already prepared.
+        let query = self.metric.preprocess(query);
+
         let mut ep = entry_id;
         for layer in (1..=entry_top).rev() {
-            ep = self.descend_layer(query, ep, layer, &guard);
+            ep = self.descend_layer(&query, ep, layer, &guard);
         }
 
-        self.search_layer(query, &[ep], ef, 0, &guard)
+        self.search_layer(&query, &[ep], ef, 0, &guard)
             .into_iter()
             .filter(|&(_, id)| {
                 self.node(id)
