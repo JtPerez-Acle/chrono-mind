@@ -11,6 +11,12 @@ chronomind vs usearch 2.25 (SIMD C++) vs FAISS 1.14 IndexHNSWFlat (Meta),
 all in a single process so the machine state is identical and the systems
 are directly comparable.
 
+> Note: chronomind beats FAISS on *this* dataset, but FAISS is dataset-
+> dependent — on NYTimes-256 it is ~2× the fastest. See
+> [nytimes-256-angular.md](nytimes-256-angular.md) for the tempered
+> cross-library picture. The durable claim is parity with usearch, not
+> beating the whole field.
+
 | efSearch | chrono recall / QPS | usearch recall / QPS | faiss recall / QPS |
 |---:|---|---|---|
 | 10  | **0.4702** / 7,248 | 0.4532 / **8,664** | 0.4596 / 7,107 |

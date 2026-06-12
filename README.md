@@ -175,17 +175,49 @@ Numbers vary with hardware and run-to-run (~±15% between sessions); the
 scaling *shapes* and order-of-magnitude gaps are the durable signal. Full
 method and analysis: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-**Against the field.** A separate head-to-head
-(`cargo bench --bench external --features bench-external`) runs the same
-data and parameters through instant-distance, hnsw_rs, and usearch — the
-C++ SIMD engine that is the serious yardstick. Result over two runs:
-**search throughput at parity with usearch within run noise** (each run
-had a different leader; both ~29–34K QPS at 8 threads, recall 0.998), 3–4×
-faster search than the pure-Rust crates, parallel build within ~20% of
-usearch. One dataset shape, one size, one machine, f32 only — the caveats
-and full table live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), and
-usearch's quantization modes (disabled for apples-to-apples) would change
-the picture in its favor at scale.
+## Against the field
+
+Two honest comparisons against real ANN libraries — one where chronomind is
+merely competitive, one where it wins by design.
+
+**Single-thread search, standard datasets.** Through the PyO3 bindings
+(`bindings/python/`), chronomind, usearch (SIMD C++), and FAISS (Meta's
+`IndexHNSWFlat`) run over the ann-benchmarks datasets with their exact
+ground truth — recall@10 vs single-thread QPS, the leaderboard convention:
+
+| dataset | recall@10 (all three) | chrono search vs usearch | chrono search vs FAISS |
+|---|---|---|---|
+| GloVe-100 (1.18M, 100-d) | ~0.90 @ ef=400 | parity (chrono slightly ahead) | chrono +66% |
+| NYTimes-256 (290k, 256-d) | ~0.90 @ ef=400 | parity (chrono ~10% behind) | FAISS ~2× ahead |
+
+The durable read: **recall matches the field on both; search throughput
+tracks usearch within ~10%, lead alternating; FAISS is dataset-dependent**
+(slowest on GloVe, fastest on NYTimes). Single-thread *build* is 12–24×
+slower than both — structural lock-free construction overhead, and honestly
+the weakest number. chronomind already uses an AVX2+FMA distance kernel, so
+search is not SIMD-limited. Full tables and caveats:
+[bindings/python/results/](bindings/python/results/).
+
+**Reads under concurrent writes — the scenario chronomind is built for**
+(`cargo bench --bench concurrency --features bench-external`). 4 readers and
+4 writers hammer one index; read throughput and tail latency are measured
+idle, then under write load:
+
+| system | read-QPS retention under writes | p99 idle → under writes |
+|---|---:|---|
+| **chronomind** (lock-free) | **65%** | 228 µs → 384 µs |
+| usearch (C++) | 62% | 186 µs → 357 µs |
+| one RwLock | **1%** | 237 µs → **79,310 µs** |
+
+The single RwLock — the default way to make an index "concurrent" —
+collapses: writers starve readers and p99 read latency explodes 334×.
+chronomind holds 65% of its read throughput with p99 barely moving (the drop
+is CPU sharing across 8 threads, not blocking), matching usearch. This is
+the wait-free claim from the top of this README, measured against the field.
+
+A third head-to-head (`cargo bench --bench external --features
+bench-external`) runs instant-distance, hnsw_rs, and usearch over the same
+synthetic data in-process; see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## The temporal model
 

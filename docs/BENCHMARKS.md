@@ -1,10 +1,89 @@
 # Benchmarks
 
-Two comparisons: internal (our lock-free index vs our own locked
-baselines — isolates the concurrency-control variable) and external
-(vs other open-source ANN libraries — locates us in the field).
+Four comparisons, in descending order of how much they matter:
 
-## Where we stand: external head-to-head
+1. **Real datasets vs usearch and FAISS** — standard ann-benchmarks data
+   through the Python bindings; locates us in the field on honest ground.
+2. **Reads under concurrent writes** — the scenario the lock-free design
+   exists for; the one axis where it wins rather than ties.
+3. **Internal A/B** — lock-free vs our own locked baselines; isolates the
+   concurrency-control variable.
+4. **In-process synthetic head-to-head** — five libraries, one synthetic
+   dataset, all in one Rust process.
+
+Per-run tables with full caveats live in
+[`bindings/python/results/`](../bindings/python/results/).
+
+## Real datasets: vs usearch and FAISS
+
+Through the PyO3 bindings (`bindings/python/`, driver `ann_bench.py`),
+chronomind, usearch 2.25 (SIMD C++), and FAISS 1.14 (`IndexHNSWFlat`, Meta)
+run over standard ann-benchmarks datasets with their exact bundled ground
+truth. M=16, efC=100, f32, cosine. QPS is one query at a time, single
+thread — the ann-benchmarks convention. Each dataset's three systems run in
+one process, so machine state is shared and comparable.
+
+**Recall@10 vs single-thread QPS, at ef=400 (the high-recall end):**
+
+| dataset | chrono recall / QPS | usearch recall / QPS | faiss recall / QPS |
+|---|---|---|---|
+| GloVe-100 (1.18M, 100-d) | 0.9015 / 419 | 0.8970 / 588 | 0.8935 / 252 |
+| NYTimes-256 (290k, 256-d) | 0.9008 / 613 | 0.9049 / 681 | 0.8943 / 1,353 |
+
+**Single-thread build:**
+
+| dataset | chronomind | usearch | faiss |
+|---|---:|---:|---:|
+| GloVe-100 | 819s | 60s | 71s |
+| NYTimes-256 | 155s | 13s | 9s |
+
+Reading it honestly:
+
+- **Recall matches the field on both** — all three within ~0.01 at every ef.
+- **Search throughput tracks usearch within ~10%**, with the lead
+  alternating (chronomind ahead on GloVe-100, ~10% behind on NYTimes-256).
+  chronomind already uses an AVX2+FMA kernel, so it is not SIMD-limited;
+  at million scale search is memory-latency-bound.
+- **FAISS is dataset-dependent** — slowest of the three on GloVe-100, ~2×
+  the fastest on NYTimes-256. So the honest cross-library claim is
+  "competitive with usearch," not "beats the field"; a single dataset
+  (GloVe) overstated it, which is exactly why the second dataset was run.
+- **Build is 12–24× slower** than both — structural lock-free construction
+  overhead (COW lists, epoch pinning, CAS, per-insert allocation), not the
+  distance metric. This is the weakest number and is not hidden.
+
+Caveats: single-threaded throughout (does NOT exercise the concurrent
+design point — see the next section); one machine; f32, no quantization;
+NYTimes contains zero vectors that mildly perturb the FAISS adapter. Full
+per-dataset tables: [`bindings/python/results/`](../bindings/python/results/).
+
+## Reads under concurrent writes
+
+`cargo bench --bench concurrency --features bench-external`. The scenario
+the lock-free design exists for, and the one every other benchmark here
+fails to exercise. 4 reader threads and 4 writer threads share one index
+(dim=256, 20k base, M=16, efS=50); read throughput and p99 read latency are
+measured with readers alone, then with writers running too.
+
+| system | read QPS idle | read QPS under writes | retention | p99 idle | p99 under writes |
+|---|---:|---:|---:|---:|---:|
+| chronomind (lock-free) | 32,234 | 21,088 | **65%** | 228 µs | 384 µs |
+| usearch (C++) | 34,769 | 21,579 | 62% | 186 µs | 357 µs |
+| sharded16 | 2,928 | 1,505 | 51% | 2,396 µs | 5,186 µs |
+| rwlock (one lock) | 33,173 | 486 | **1%** | 237 µs | **79,310 µs** |
+
+- **The single RwLock collapses**: 1% read retention, p99 explodes 334× to
+  79 ms. Writers hold the exclusive lock; readers starve. This is the
+  failure the whole design avoids.
+- **chronomind retains 65% with p99 barely moving** (1.7×). The drop is CPU
+  sharing across 8 threads, not blocking — a blocked reader would show the
+  RwLock's latency explosion, not a flat p99. Wait-free reads, demonstrated.
+- **chronomind matches usearch** — both are genuinely concurrent; lock-free
+  Rust pays no penalty here.
+- sharded16 survives writes better than one lock but starts from a far lower
+  read base (scatter-gather across 16 shards).
+
+## Where we stand: in-process synthetic head-to-head
 
 `cargo bench --bench external --features bench-external` — five systems,
 identical seeded data (10,000 × 768-d embedding-like vectors, unit norm),
