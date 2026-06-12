@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/JtPerez-Acle/chrono-mind/actions/workflows/ci.yml/badge.svg)](https://github.com/JtPerez-Acle/chrono-mind/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![MSRV](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](Cargo.toml)
+[![MSRV](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](Cargo.toml)
 
 **A temporal vector store for AI agent memory, built on a genuinely lock-free
 concurrent HNSW index.**
@@ -92,7 +92,7 @@ Claims about concurrent code are cheap; ChronoMind ships its receipts:
 | **Op-sequence fuzzing** | proptest drives arbitrary insert/remove/search/consolidate sequences with the structural invariant sweep as the oracle; a coverage-guided cargo-fuzz target runs the same harness in CI |
 | **Differential oracle** | Arbitrary op sequences run against BOTH index implementations must match a brute-force linear-scan model *exactly* (ids, order, distances) in the exhaustive-ef regime — lost inserts, ghost tombstones, and distance corruption cannot hide |
 | **Reproducible persistence** | Snapshot saves are atomic (temp file + fsync + rename) with a CRC32 body checksum: corruption is rejected, a crash mid-save can never destroy the previous snapshot — both gated by tests |
-| **MSRV proof** | CI compiles the crate on Rust 1.75 so the badge is verified, not asserted |
+| **MSRV proof** | CI compiles the crate on Rust 1.82 so the badge is verified, not asserted |
 | **ThreadSanitizer** | The stress suite under TSan on real scheduling — the complement to loom's models (suppressions cover only crossbeam-epoch's fence-based sync, never our code) |
 | **ARM (weak memory)** | The full suite on aarch64 Linux in CI — x86's strong ordering can mask acquire/release mistakes; ARM hardware cannot |
 | **CI** | All of the above on every push, Windows and Linux |

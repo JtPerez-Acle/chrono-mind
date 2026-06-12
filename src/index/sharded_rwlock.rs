@@ -25,7 +25,7 @@ use crate::metric::DistanceMetric;
 const SHARDS: usize = 16;
 const SHARD_BITS: u32 = 4;
 
-/// HNSW sharded over [`SHARDS`] independent `RwLock`-guarded graphs.
+/// HNSW sharded over `SHARDS` (16) independent `RwLock`-guarded graphs.
 /// See the module docs.
 pub struct ShardedRwLockHnsw {
     shards: Vec<RwLockHnsw>,

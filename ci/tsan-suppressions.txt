@@ -1,14 +1,32 @@
-# ThreadSanitizer suppressions.
+# ThreadSanitizer suppressions: epoch/RCU reclamation barriers.
 #
-# crossbeam-epoch synchronizes with standalone memory fences
-# (atomic::fence), which TSan's happens-before machinery cannot model —
-# it reports false-positive races inside the epoch machinery on every
-# fence-paired access. This is a known TSan limitation, and crossbeam's
-# own CI carries the same class of suppression.
+# Both reclamation libraries in our dependency graph synchronize through
+# mechanisms TSan's happens-before machinery cannot model, so it reports
+# false-positive races inside their internals (never in chronomind's code):
 #
-# Scope is deliberately narrow: only crossbeam internals are suppressed.
-# Races in chronomind's own code are NOT suppressed — finding those is
-# the entire point of the TSan job. The epoch protocol itself is covered
-# by loom (model checking) and Miri (tree borrows) instead.
+#   * seize (transitive via papaya, used by ChronoMind's concurrent store)
+#     synchronizes deferred reclamation with sys_membarrier() — an
+#     asymmetric, kernel-mediated memory barrier (its `fast-barrier` default
+#     feature). The reader fast path issues only a compiler fence, and seize
+#     deliberately weakens its atomic orderings to match, because the real
+#     happens-before edge is established by the membarrier syscall. TSan
+#     cannot observe that syscall, so it sees the deferred batch free racing
+#     the refcount decrement. This is the source of every race this job
+#     actually reports. It cannot be turned off from here: papaya enables
+#     seize's default features and Cargo feature unification cannot subtract
+#     them, so seize stays on its membarrier strategy rather than its
+#     TSan-visible SeqCst-fence FALLBACK.
+#
+#   * crossbeam-epoch (used by the lock-free index) synchronizes with
+#     standalone atomic::fence calls, which TSan also models incompletely.
+#     This run was clean, but crossbeam's own CI carries the same class of
+#     suppression; it is kept here as defense-in-depth.
+#
+# Scope is deliberately narrow: only these libraries' reclamation internals
+# are suppressed. Races in chronomind's own code are NOT suppressed — finding
+# those is the entire point of this job. The reclamation protocols themselves
+# are covered by loom (model checking) and Miri (tree borrows) instead.
+race:seize::raw::collector
+race:seize::raw::membarrier
 race:crossbeam_epoch
 race:crossbeam_utils

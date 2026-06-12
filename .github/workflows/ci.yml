@@ -35,15 +35,18 @@ jobs:
         run: cargo check --benches
 
   # The README badge claims an MSRV; this proves it (lib + bin only — dev
-  # dependencies may legitimately need newer toolchains).
+  # dependencies may legitimately need newer toolchains). The library code
+  # itself compiles far below this (papaya and seize need only 1.72), but
+  # the committed Cargo.lock is format v4, which Cargo cannot parse before
+  # 1.78; 1.82 is the floor we actually verify.
   msrv:
-    name: MSRV 1.75
+    name: MSRV 1.82
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.75"
+          toolchain: "1.82"
       - uses: Swatinem/rust-cache@v2
       - name: Check on MSRV
         run: cargo check
@@ -62,9 +65,10 @@ jobs:
         run: cargo test
 
   # ThreadSanitizer checks the REAL code under real scheduling — the
-  # complement to loom, which checks models. Suppressions cover only
-  # crossbeam-epoch's fence-based sync (invisible to TSan by design);
-  # races in chronomind's own code are not suppressed.
+  # complement to loom, which checks models. Suppressions cover only the
+  # reclamation internals of seize (sys_membarrier, invisible to TSan) and
+  # crossbeam-epoch's fences; races in chronomind's own code are not
+  # suppressed. See ci/tsan-suppressions.txt for the full rationale.
   tsan:
     name: thread sanitizer (stress suite)
     runs-on: ubuntu-latest

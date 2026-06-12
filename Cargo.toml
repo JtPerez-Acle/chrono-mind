@@ -2,7 +2,7 @@
 name = "chronomind"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.82"
 description = "A temporal vector store for AI agent memory, with time-aware similarity search"
 authors = ["JtPerez-Acle <jtperez.acle@gmail.com>"]
 license = "MIT OR Apache-2.0"
