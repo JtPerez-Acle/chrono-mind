@@ -4,15 +4,27 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![MSRV](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](Cargo.toml)
 
-**A temporal vector store for AI agent memory, built on a genuinely lock-free
-concurrent HNSW index.**
+**A lock-free concurrent HNSW vector index — wait-free reads, lock-free
+writes — with a temporal memory layer for AI agents on top.**
 
-ChronoMind stores embedding vectors together with temporal attributes —
-creation time, importance, decay rate, access history — and ranks search
-results by a documented blend of geometric distance and recency. Memories
-decay, near-duplicates consolidate, and related memories link into graphs.
-The entire store is shareable across threads through a plain `&self` API:
-**no operation anywhere in this crate blocks on a mutex or RwLock.**
+The contribution is the index. It is a Hierarchical Navigable Small World
+graph whose searches are **wait-free** and whose writes are **lock-free**,
+shareable across threads through a plain `&self` API — **no operation
+anywhere in this crate blocks on a mutex or RwLock** — and the receipts
+(loom, Miri, ThreadSanitizer, a differential oracle, all in CI) back the
+claim. Measured against usearch and FAISS it holds recall and search
+throughput; under concurrent reads-and-writes it keeps serving where a
+locked index stalls (see [Against the field](#against-the-field)).
+
+On top sits a **temporal memory layer** for agent use cases: vectors carry
+importance, decay rate, and access history, and search blends geometric
+distance with recency. This layer is an *application* of the index, and it
+has one constraint worth stating up front. The node arena is append-only:
+refreshing a memory's importance is a cheap atomic CAS, but **rewriting a
+memory's embedding allocates a fresh slot** (the old one is tombstoned until
+a snapshot reload compacts). Insert-and-refresh workloads are the sweet
+spot; workloads that continuously *rewrite embeddings* grow memory between
+compactions. Plan for periodic snapshot reloads, or use the index directly.
 
 ```rust
 use chronomind::{ChronoMind, Config, Memory, MemoryAttributes, Vector};
@@ -132,48 +144,55 @@ mid-estimates from one coherent run:
 
 | threads | lock-free | RwLock | sharded16 |
 |--------:|----------:|-------:|----------:|
-| 1 | 2,471 | 2,498 | **7,984** |
-| 2 | 4,538 | 2,751 | **14,220** |
-| 4 | 9,488 | 2,775 | **23,262** |
-| 8 | 18,639 | 2,853 | **44,913** |
+| 1 | 3,859 | 4,123 | **10,130** |
+| 2 | 7,839 | 4,034 | **20,204** |
+| 4 | 15,286 | 4,028 | **39,264** |
+| 8 | 28,300 | 4,038 | **71,152** |
 
 Honest verdict: **sharding wins pure construction** — each insert searches
 a graph 1/16th the size, and writers rarely collide across 16 locks. The
-single RwLock is flat; the lock-free index scales near-linearly (7.5×
-self-scaling) but pays full-graph construction cost per insert.
+single RwLock is flat (one writer at a time); the lock-free index scales
+near-linearly (7.3× from 1→8 threads) but pays full-graph construction cost
+per insert.
 
 **Pure search, zero writers:**
 
 | threads | lock-free | RwLock | sharded16 |
 |--------:|----------:|-------:|----------:|
-| 1 | 3,618 | 3,642 | 393 |
-| 2 | 6,806 | 7,396 | 905 |
-| 4 | 13,262 | 14,478 | 1,665 |
-| 8 | **26,256** | **27,050** | 3,506 |
+| 1 | 3,539 | 3,585 | 387 |
+| 2 | 7,051 | 7,305 | 1,088 |
+| 4 | 14,075 | 14,673 | 2,483 |
+| 8 | **26,834** | **27,904** | 5,008 |
 
 Sharding's bill comes due: every query pays 16 sub-searches plus a merge —
-**~9× slower** at every thread count. The uncontended RwLock keeps a small
-constant edge over lock-free (epoch pinning is not free); that is the
-honest cost of wait-free reads.
+**9× slower at 1 thread, ~5× at 8** (its shards scale, but from a deep
+hole). The uncontended RwLock keeps a small constant edge over lock-free
+(~2–4%, epoch pinning is not free); that is the honest cost of wait-free
+reads — and the same edge that makes RwLock fractionally faster at 1 thread
+in the mixed table below.
 
-**Mixed 90% search / 10% insert** (the realistic agent-memory workload):
+**Mixed 90% search / 10% insert** (a search-dominated workload with steady
+writes):
 
 | threads | lock-free | RwLock | sharded16 |
 |--------:|----------:|-------:|----------:|
-| 1 | 16,039 | 22,106 | 529 |
-| 2 | 38,337 | 20,335 | 1,120 |
-| 4 | 66,440 | 16,298 | 2,110 |
-| 8 | **114,570** | 22,621 | 5,204 |
+| 1 | 4,922 | 5,582 | 567 |
+| 2 | 11,420 | 5,558 | 1,138 |
+| 4 | 28,733 | 5,721 | 2,325 |
+| 8 | **59,998** | 10,858 | 4,012 |
 
 The workload that matters, and the only one with a single winner: the
-lock-free index beats the flat RwLock **5×** and the sharded design **22×**
-at 8 threads. Sharding's read tax devours its write advantage the moment
-searches dominate; the RwLock throttles everyone once 10% of traffic
-writes.
+lock-free index scales near-linearly to **60k ops/s**, beating the RwLock
+**5.5×** and the sharded design **15×** at 8 threads. The RwLock is **flat
+under writes** — its 10% inserts take the lock exclusively and throttle
+every reader, so it never benefits from more threads. At 1 thread the
+RwLock is marginally ahead (5,582 vs 4,922) for the same reason it leads
+pure search: an uncontended read guard is a hair cheaper than epoch
+pinning. Lock-free overtakes it the instant a second thread writes.
 
-Numbers vary with hardware and run-to-run (~±15% between sessions); the
-scaling *shapes* and order-of-magnitude gaps are the durable signal. Full
-method and analysis: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Numbers vary with hardware and run-to-run; the scaling *shapes* and
+order-of-magnitude gaps are the durable signal. Full method and analysis:
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Against the field
 

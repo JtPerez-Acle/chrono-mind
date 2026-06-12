@@ -130,19 +130,25 @@ concurrency control.
 ### Method
 
 - `cargo bench` (criterion 0.5), bench target `benches/comparison.rs`.
-- Data: 768-dimensional unit vectors confined to a random 16-d subspace
+- Data: 768-dimensional unit vectors confined to ONE random 16-d subspace
   ("embedding-like" — real embeddings have low intrinsic dimensionality;
-  uniform 768-d noise is not a representative workload).
+  uniform 768-d noise is not a representative workload). Corpus, queries,
+  and insert streams all share that subspace — as if produced by one
+  embedding model — so a query has genuine near-neighbors in the corpus.
 - Index parameters: M = 16, efConstruction = 100, efSearch = 50.
 - Workloads, each at 1 / 2 / 4 / 8 threads:
   - `insert_throughput`: build a 4,000-vector index from scratch, work
     split evenly across threads.
   - `search_qps`: 2,000 queries against a pre-built 10,000-vector index.
   - `mixed_90_10`: 2,000 ops, 90% search / 10% insert, against a
-    pre-built 10,000-vector index. One index per thread-count
-    configuration; the 10% inserts accumulate across criterion samples
-    (bounded, ~200/iteration on a 10k corpus) rather than rebuilding per
-    sample, which would make graph construction dominate the timing.
+    pre-built 10,000-vector index, one index per thread-count config. The
+    10% inserts accumulate across criterion samples, but because every query
+    has near-neighbors in the original corpus (shared subspace), search cost
+    does not depend on how many inserts a given sample happened to run. An
+    earlier version got this wrong: queries lived in a subspace *foreign* to
+    the corpus, so searches only found close points among the accumulated
+    inserts — making throughput balloon with sample count and scale
+    non-monotonically. Sharing the subspace fixed it.
 - Sizes are deliberately minutes-scale: the meaningful signal is the
   *relative scaling under contention* of the implementations, which is
   stable across corpus size; absolute numbers vary with hardware. (These
@@ -168,50 +174,55 @@ one coherent run.
 
 | threads | lock-free | RwLock | sharded16 |
 |--------:|----------:|-------:|----------:|
-| 1 | 2,471 | 2,498 | 7,984 |
-| 2 | 4,538 | 2,751 | 14,220 |
-| 4 | 9,488 | 2,775 | 23,262 |
-| 8 | 18,639 | 2,853 | 44,913 |
+| 1 | 3,859 | 4,123 | 10,130 |
+| 2 | 7,839 | 4,034 | 20,204 |
+| 4 | 15,286 | 4,028 | 39,264 |
+| 8 | 28,300 | 4,038 | 71,152 |
 
 ### search_qps — 2,000 queries, 10,000-vector index, no writers
 
 | threads | lock-free | RwLock | sharded16 |
 |--------:|----------:|-------:|----------:|
-| 1 | 3,618 | 3,642 | 393 |
-| 2 | 6,806 | 7,396 | 905 |
-| 4 | 13,262 | 14,478 | 1,665 |
-| 8 | 26,256 | 27,050 | 3,506 |
+| 1 | 3,539 | 3,585 | 387 |
+| 2 | 7,051 | 7,305 | 1,088 |
+| 4 | 14,075 | 14,673 | 2,483 |
+| 8 | 26,834 | 27,904 | 5,008 |
 
 ### mixed_90_10 — 2,000 ops, 90% search / 10% insert
 
 | threads | lock-free | RwLock | sharded16 |
 |--------:|----------:|-------:|----------:|
-| 1 | 16,039 | 22,106 | 529 |
-| 2 | 38,337 | 20,335 | 1,120 |
-| 4 | 66,440 | 16,298 | 2,110 |
-| 8 | 114,570 | 22,621 | 5,204 |
+| 1 | 4,922 | 5,582 | 567 |
+| 2 | 11,420 | 5,558 | 1,138 |
+| 4 | 28,733 | 5,721 | 2,325 |
+| 8 | 59,998 | 10,858 | 4,012 |
 
-The lockfree/rwlock shapes were reproduced across three separate `cargo
-bench` sessions (absolute numbers drift ~±15% with machine state; ordering
-and scaling shape agree). The sharded16 deltas are order-of-magnitude —
-far beyond session variance.
+Scaling is monotonic for every contender (it was not, before the subspace
+fix above). Absolute numbers drift with machine state across sessions; the
+scaling *shapes* and the order-of-magnitude gaps are the durable signal.
 
 ### Reading the three-way comparison
 
 - **Sharding wins pure construction, honestly.** Round-robin over 16
   shards means each insert searches a graph 1/16th the size *and* writers
-  rarely contend — 2.4× over lock-free at 8 threads. If your workload is
+  rarely contend — 2.5× over lock-free at 8 threads. If your workload is
   bulk-load-then-freeze, shard it.
 - **Sharding loses everything else.** Every query pays 16 sub-searches
-  plus a merge: 9× slower on pure search at 1 thread (7.5× at 8 threads,
-  where lock-free's read scaling narrows the gap), and 22× slower on the
-  mixed workload at 8 threads. The read tax is structural, not tunable.
-- **The single RwLock is flat wherever writes exist** — serialized
-  writers can't use threads, and exclusive writers stall every reader the
-  moment 10% of traffic writes.
+  plus a merge: 9× slower on pure search at 1 thread (~5× at 8, where its
+  shards scale but from a deep hole), and 15× slower on the mixed workload
+  at 8 threads. The read tax is structural, not tunable.
+- **The single RwLock is flat wherever writes exist** — insert throughput
+  is flat at ~4k across all thread counts (one writer at a time), and on the
+  mixed workload its exclusive 10% inserts stall every reader, so it barely
+  moves from 1→4 threads. At 1 thread, uncontended, it is marginally *ahead*
+  of lock-free on both search (~2–4%) and mixed (13%): an uncontended read
+  guard is a hair cheaper than epoch pinning. That edge vanishes the instant
+  a second thread writes.
 - **The lock-free index is the only contender that wins the realistic
-  workload** (search-dominated with steady writes), and the only one whose
-  read latency is immune to writers (wait-free). Its concessions: ~5%
-  constant read overhead vs an uncontended RwLock, and per-insert
-  full-graph construction cost vs sharding's smaller graphs.
+  workload** (search-dominated with steady writes) — 60k ops/s at 8 threads,
+  5.5× the RwLock and 15× sharded — and the only one whose read latency is
+  immune to writers (wait-free; see the reads-under-writes section above).
+  Its concessions: a few percent constant read overhead vs an uncontended
+  RwLock, and per-insert full-graph construction cost vs sharding's smaller
+  graphs.
 

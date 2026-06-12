@@ -50,6 +50,15 @@ First published release. 0.2.0 was the internal ground-up rebuild (below);
   with the full rationale; chronomind's own code remains unsuppressed.
 - Public docs on `ShardedRwLockHnsw` linked the private `SHARDS` const via an
   intra-doc link, failing `cargo doc -D warnings`. Demoted to a code span.
+- `mixed_90_10` benchmark methodology: corpus, queries, and inserts now
+  share one embedding subspace. Previously queries lived in a subspace
+  foreign to the corpus, so the workload's accumulated same-subspace inserts
+  seeded an artificially easy cluster — inflating throughput and producing
+  non-monotonic thread scaling. The corrected numbers are lower and stable
+  (README and docs/BENCHMARKS.md updated).
+- README now leads with the lock-free index as the contribution and the
+  temporal store as the application on top, and states the append-only
+  arena's reinsert cost (embedding rewrites allocate a fresh slot) up front.
 
 ## [0.2.0] - 2026-06-11
 

@@ -75,9 +75,11 @@ impl Impl {
     }
 }
 
-fn embedding_dataset(n: usize, seed: u64) -> Vec<Vec<f32>> {
+/// A random `INTRINSIC`-dimensional subspace of `DIM`-space, modeling a
+/// single embedding model's output manifold.
+fn make_basis(seed: u64) -> Vec<Vec<f32>> {
     let mut rng = StdRng::seed_from_u64(seed);
-    let basis: Vec<Vec<f32>> = (0..INTRINSIC)
+    (0..INTRINSIC)
         .map(|_| {
             let mut v: Vec<f32> = (0..DIM).map(|_| rng.gen_range(-1.0..1.0)).collect();
             let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -86,12 +88,22 @@ fn embedding_dataset(n: usize, seed: u64) -> Vec<Vec<f32>> {
             }
             v
         })
-        .collect();
+        .collect()
+}
 
+/// `n` unit vectors drawn from the given `basis`. Corpus, queries, and
+/// insert streams all share ONE basis: a query and the stored data come
+/// from the same embedding model, so a query has genuine near-neighbors in
+/// the corpus rather than being near-orthogonal to all of it. Sharing the
+/// basis is also what keeps `mixed_90_10` honest — otherwise the 10%
+/// inserts (same subspace as the searches) would seed an easy cluster that
+/// the searches then hit, inflating throughput as inserts accumulate.
+fn embedding_samples(n: usize, basis: &[Vec<f32>], seed: u64) -> Vec<Vec<f32>> {
+    let mut rng = StdRng::seed_from_u64(seed);
     (0..n)
         .map(|_| {
             let mut v = vec![0.0f32; DIM];
-            for b in &basis {
+            for b in basis {
                 let coeff: f32 = rng.gen_range(-1.0..1.0);
                 for (out, x) in v.iter_mut().zip(b) {
                     *out += coeff * x;
@@ -127,7 +139,8 @@ fn timed_parallel<T: Sync>(threads: usize, work: &[T], op: impl Fn(&T) + Sync) -
 }
 
 fn insert_throughput(c: &mut Criterion) {
-    let data = embedding_dataset(INSERT_N, SEED);
+    let basis = make_basis(SEED);
+    let data = embedding_samples(INSERT_N, &basis, SEED ^ 0x1);
     let mut group = c.benchmark_group("insert_throughput");
     group.sample_size(10);
     group.throughput(criterion::Throughput::Elements(INSERT_N as u64));
@@ -156,8 +169,12 @@ fn insert_throughput(c: &mut Criterion) {
 }
 
 fn search_qps(c: &mut Criterion) {
-    let corpus = embedding_dataset(PREBUILT_N, SEED);
-    let queries = embedding_dataset(SEARCH_OPS, SEED ^ 0xFACE);
+    let basis = make_basis(SEED);
+    let corpus = embedding_samples(PREBUILT_N, &basis, SEED ^ 0x1);
+    // Queries share the corpus subspace: a real query has near-neighbors in
+    // the corpus, so this measures representative search cost, not the
+    // pathological all-points-equidistant case of a foreign-subspace query.
+    let queries = embedding_samples(SEARCH_OPS, &basis, SEED ^ 0xFACE);
 
     let mut group = c.benchmark_group("search_qps");
     group.sample_size(10);
@@ -190,9 +207,14 @@ fn search_qps(c: &mut Criterion) {
 }
 
 fn mixed_90_10(c: &mut Criterion) {
-    let corpus = embedding_dataset(PREBUILT_N, SEED);
+    let basis = make_basis(SEED);
+    let corpus = embedding_samples(PREBUILT_N, &basis, SEED ^ 0x1);
     // One op stream: every 10th op inserts a fresh vector, the rest search.
-    let stream = embedding_dataset(MIXED_OPS, SEED ^ 0xD1CE);
+    // Same subspace as the corpus, so searches find genuine near-neighbors
+    // in the original 10k corpus whether or not inserts have accumulated —
+    // search cost no longer depends on how many inserts a sample happened to
+    // run, which is what made the old numbers unstable and non-monotonic.
+    let stream = embedding_samples(MIXED_OPS, &basis, SEED ^ 0xD1CE);
 
     let mut group = c.benchmark_group("mixed_90_10");
     group.sample_size(10);
