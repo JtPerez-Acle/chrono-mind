@@ -1,0 +1,19 @@
+# Standalone crate (deliberately NOT a workspace member of the root): it
+# keeps its own Cargo.lock and target dir so the PyO3 / numpy dependency
+# tree never touches the published library or its green CI. Built with
+# maturin; depends on chronomind by path.
+[package]
+name = "chronomind-py"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[lib]
+# The compiled module is imported as `import chronomind` from Python.
+name = "chronomind"
+crate-type = ["cdylib"]
+
+[dependencies]
+chronomind = { path = "../.." }
+pyo3 = { version = "0.23", features = ["extension-module"] }
+numpy = "0.23"
